@@ -1,0 +1,3 @@
+trueforge
+requests
+python-dotenv
