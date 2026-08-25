@@ -21,6 +21,9 @@ from rich.table import Table
 from .provision import build_client, load_spec, SpecError
 from .trueforge_client import TrueForgeClient, TrueForgeError
 from . import receipts as receipts_store
+from dataclasses import dataclass
+from . import policy
+from .policy import Target, Violation
 
 console = Console(highlight=False)
 RUNS_DIR = Path("runs")
@@ -107,6 +110,19 @@ def lookup_call(index: dict[str, dict[str, Any]], pending_call: dict[str, Any]) 
     return "<unknown tool>", "<arguments unavailable>"
 
 
+def lookup_arguments(index: dict[str, dict[str, Any]], pending_call: dict[str, Any]) -> dict[str, Any]:
+    source = index.get(pending_call.get("source_event_id", ""), {})
+    for call in source.get("tool_calls", []):
+        if call.get("id") == pending_call.get("id"):
+            raw = (call.get("function") or {}).get("arguments") or ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 class AuditLog:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,9 +186,20 @@ def render_event(event: dict[str, Any], index: dict[str, dict[str, Any]]) -> Non
         console.print(f"\n[dim]turn finished: {status}{extra}[/dim]")
 
 
-def show_approval_request(tool_name: str, arguments: str) -> None:
+def show_violations(violations: list[Violation], title: str) -> None:
+    table = Table(title=title, show_header=True, header_style="bold red")
+    table.add_column("code"); table.add_column("where"); table.add_column("why")
+    for v in violations:
+        code = f"[bold red]{v.code}[/bold red]" if v.fatal else v.code
+        table.add_row(code, v.where, v.message)
+    console.print(table)
+
+def show_approval_request(tool_name: str, arguments: str, clean: bool) -> None:
+    verdict = ("[green]policy gate: PASSED[/green]" if clean else "[red]policy gate: FAILED[/red]")
     console.print()
-    console.print(Panel(f"The agent wants to call [bold]{tool_name}[/bold], which writes to GitHub.\nNothing has been posted yet.", title="[bold red]APPROVAL GATE[/bold red]", border_style="red"))
+    console.print(Panel(
+        f"The agent wants to call [bold]{tool_name}[/bold], which writes to GitHub.\nNothing posted yet.\n\n{verdict}",
+        title="[bold red]APPROVAL GATE[/bold red]", border_style="red"))
     console.print(Syntax(arguments, "json", theme="ansi_dark", word_wrap=True))
 
 
@@ -241,6 +268,15 @@ def persist_receipts(output: str, repo: str, pr: str, session_id: str) -> None:
     console.print(f"[green]receipts persisted:[/green] {path}")
 
 
+@dataclass
+class GateState:
+    repairs_left: int = 2
+    approvals: int = 0
+    denials: int = 0
+    policy_denials: int = 0
+    approved_receipts: dict[str, Any] | None = None
+
+
 def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10) -> str:
     session = client.create_session(agent_name)
     session_id = session["id"]
@@ -301,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr", default=os.getenv("REVIEW_PR", ""))
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--show-gate", action="store_true")
+    parser.add_argument("--show-policy", action="store_true")
     parser.add_argument("--replay", type=Path, default=None)
     parser.add_argument("--verify", type=Path, default=None)
     parser.add_argument("--auto-approve", action="store_true")
@@ -335,6 +372,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.show_gate:
         summarise_gate(manifest)
+        return 0
+
+    if args.show_policy:
+        table = Table(title="Verdict rules", show_header=True)
+        table.add_column("Verdict")
+        table.add_column("Required sandbox outcomes")
+        table.add_column("May ship fix diff")
+        for verdict, required, allows in policy.rules_summary():
+            table.add_row(verdict, required, allows)
+        console.print(table)
         return 0
 
     auto_approve = args.auto_approve
