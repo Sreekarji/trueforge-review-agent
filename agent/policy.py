@@ -12,7 +12,7 @@ MAX_BODY_CHARS = 12_000
 MIN_OUTPUT_CHARS = 20
 BODY_KEYS = ("body", "comment", "text", "message")
 
-RECEIPTS_BLOCK = re.compile(r"```receipts\s*\n(.*?)```", re.DOTALL)
+RECEIPTS_BLOCK = re.compile(r"```receipts\s*\n(.*?)\n```\s*$", re.DOTALL)
 
 SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),
@@ -78,9 +78,11 @@ def body_of(arguments: dict[str, Any]) -> str:
 
 
 def extract_receipts(body: str) -> tuple[dict[str, Any], str | None]:
+    if body.count("```receipts") != 1:
+        return {}, "body must contain exactly one ```receipts fenced block"
     match = RECEIPTS_BLOCK.search(body)
     if match is None:
-        return {}, "no ```receipts JSON block found"
+        return {}, "the ```receipts block must be the last thing in the comment"
     try:
         parsed = json.loads(match.group(1))
     except json.JSONDecodeError as exc:
@@ -91,15 +93,17 @@ def extract_receipts(body: str) -> tuple[dict[str, Any], str | None]:
 
 
 def _outcome(run: Any) -> str | None:
+    """'pass'/'fail' only when BOTH the outcome string and a real integer
+    exit_code are present AND agree. A missing, boolean, or contradictory
+    exit_code is not valid evidence, so it returns None."""
     if not isinstance(run, dict):
         return None
     outcome = str(run.get("outcome", "")).strip().lower()
-    if outcome in ("pass", "fail"):
-        return outcome
     code = run.get("exit_code")
-    if isinstance(code, bool) or not isinstance(code, int):
+    if outcome not in ("pass", "fail") or isinstance(code, bool) or not isinstance(code, int):
         return None
-    return "pass" if code == 0 else "fail"
+    derived = "pass" if code == 0 else "fail"
+    return outcome if derived == outcome else None
 
 
 def _evidence_violations(run: Any, label: str, where: str) -> list[Violation]:
@@ -124,11 +128,19 @@ def _finding_violations(finding: dict[str, Any], where: str) -> list[Violation]:
     for key in ("file", "claim"):
         if not str(finding.get(key, "")).strip():
             found.append(Violation("MISSING_FIELD", f"{key} is required", where))
+    if not str(finding.get("severity", "")).strip():
+        found.append(Violation("MISSING_FIELD", "severity is required", where))
+    line = finding.get("line")
+    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+        found.append(Violation("MISSING_FIELD", "line must be a positive integer", where))
     has_diff = bool(str(finding.get("fix_diff", "")).strip())
     if has_diff and not rule.allows_fix_diff:
         found.append(Violation("UNPROVEN_FIX", f"a {verdict} finding may not ship a fix diff", where))
-    if verdict in PROVEN_VERDICTS and not str(finding.get("test_source", "")).strip():
-        found.append(Violation("NO_TEST_SOURCE", "a proven finding must carry its test_source verbatim", where))
+    if verdict in PROVEN_VERDICTS:
+        if not str(finding.get("test_source", "")).strip():
+            found.append(Violation("NO_TEST_SOURCE", "a proven finding must carry its test_source verbatim", where))
+        if not str(finding.get("test_path", "")).strip():
+            found.append(Violation("MISSING_FIELD", "test_path is required for a proven finding", where))
     runs = finding.get("runs")
     if rule.outcomes and not isinstance(runs, dict):
         return found + [Violation("NO_RUNS", f"verdict {verdict} requires a runs object", where)]
@@ -165,10 +177,29 @@ def _count_violations(receipts: dict[str, Any], findings: Sequence[Any]) -> list
     return found
 
 
+def _receipt_scope_violations(receipts: dict[str, Any], target: "Target") -> list[Violation]:
+    if not target.repo:
+        return []
+    got_repo = str(receipts.get("repo", "")).strip()
+    got_pr = str(receipts.get("pr", "")).strip()
+    found: list[Violation] = []
+    if not got_repo or not got_pr:
+        found.append(Violation("SCOPE_MISSING", "receipts must declare repo and pr matching the review", "receipts", fatal=True))
+    if got_repo and got_repo != target.repo:
+        found.append(Violation("WRONG_REPO", f"receipts scoped to {got_repo!r} but review is {target.repo}", "receipts", fatal=True))
+    if got_pr and target.pr and got_pr != str(target.pr):
+        found.append(Violation("WRONG_PR", f"receipts scoped to PR #{got_pr} but review is #{target.pr}", "receipts", fatal=True))
+    return found
+
+
 def check_receipts(receipts: dict[str, Any], target: "Target" = Target()) -> list[Violation]:
     found: list[Violation] = []
     if receipts.get("schema") != SCHEMA:
         found.append(Violation("BAD_SCHEMA", f"schema must be {SCHEMA!r}, got {receipts.get('schema')!r}"))
+    for key in ("repo", "pr", "base_sha", "head_sha"):
+        if not str(receipts.get(key, "")).strip():
+            found.append(Violation("MISSING_FIELD", f"receipts.{key} is required", "receipts"))
+    found.extend(_receipt_scope_violations(receipts, target))
     findings = receipts.get("findings")
     if not isinstance(findings, list):
         return found + [Violation("NO_FINDINGS", "receipts.findings must be a list")]
@@ -196,10 +227,14 @@ def _target_violations(arguments: dict[str, Any], target: "Target") -> list[Viol
     want_owner, _, want_name = target.repo.partition("/")
     owner, name = str(arguments.get("owner", "")), str(arguments.get("repo", ""))
     found: list[Violation] = []
-    if owner and name and (owner, name) != (want_owner, want_name):
+    if not owner or not name:
+        found.append(Violation("SCOPE_MISSING", "the write must declare owner and repo matching the review", fatal=True))
+    elif (owner, name) != (want_owner, want_name):
         found.append(Violation("WRONG_REPO", f"targets {owner}/{name} but scoped to {target.repo}", fatal=True))
     number = arguments.get("issue_number") or arguments.get("pull_number") or arguments.get("pullNumber")
-    if number is not None and target.pr and str(number) != str(target.pr):
+    if number is None:
+        found.append(Violation("SCOPE_MISSING", "the write must declare the issue/PR number", fatal=True))
+    elif target.pr and str(number) != str(target.pr):
         found.append(Violation("WRONG_PR", f"targets #{number} but scoped to #{target.pr}", fatal=True))
     return found
 

@@ -48,8 +48,16 @@ def test_fix_diff_without_green_patched_run_is_denied():
     assert "UNPROVEN_FIX" in codes(check_receipts(r, TARGET))
 
 def test_fabricated_evidence_without_real_output_is_denied():
-    r = copy.deepcopy(RECEIPTS); r["findings"][0]["runs"]["head"] = {"cmd": "pytest", "outcome": "fail", "tail": "nope"}
+    r = copy.deepcopy(RECEIPTS); r["findings"][0]["runs"]["head"] = {"cmd": "pytest", "exit_code": 1, "outcome": "fail", "tail": "nope"}
     assert "NO_OUTPUT" in codes(check_receipts(r, TARGET))
+
+def test_contradictory_outcome_and_exit_code_are_denied():
+    r = copy.deepcopy(RECEIPTS); r["findings"][0]["runs"]["head"] = {"cmd": "python -m pytest t.py -q", "exit_code": 0, "outcome": "fail", "tail": "E   AssertionError: assert 0.0 == 12.5\n1 failed in 0.11s"}
+    assert "NO_RUN_OUTCOME" in codes(check_receipts(r, TARGET))
+
+def test_missing_exit_code_is_denied():
+    r = copy.deepcopy(RECEIPTS); r["findings"][0]["runs"]["head"] = {"cmd": "python -m pytest t.py -q", "outcome": "fail", "tail": "E   AssertionError: assert 0.0 == 12.5\n1 failed in 0.11s"}
+    assert "NO_RUN_OUTCOME" in codes(check_receipts(r, TARGET))
 
 def test_refuted_findings_may_not_be_reported():
     r = copy.deepcopy(RECEIPTS); r["findings"][0]["verdict"] = "REFUTED"
@@ -77,3 +85,36 @@ def test_merge_tool_is_refused_outright():
 def test_credential_in_body_is_fatal():
     tool, args = payload(RECEIPTS); args["body"] += "\ntoken: ghp_abcdefghijklmnopqrstuvwxyz0123\n"
     assert "SECRET_IN_BODY" in codes(check_payload(tool, args, TARGET))
+
+
+def test_receipts_scope_mismatch_is_fatal():
+    r = copy.deepcopy(RECEIPTS); r["repo"] = "other/repo"
+    assert "WRONG_REPO" in codes(check_receipts(r, TARGET))
+
+def test_missing_receipts_scope_is_fatal():
+    r = copy.deepcopy(RECEIPTS); r.pop("repo", None); r.pop("pr", None)
+    assert "SCOPE_MISSING" in codes(check_receipts(r, TARGET))
+
+def test_incomplete_receipts_missing_base_sha_is_denied():
+    r = copy.deepcopy(RECEIPTS); r.pop("base_sha")
+    assert "MISSING_FIELD" in codes(check_receipts(r, TARGET))
+
+def test_finding_missing_line_is_denied():
+    r = copy.deepcopy(RECEIPTS); r["findings"][0].pop("line")
+    assert "MISSING_FIELD" in codes(check_receipts(r, TARGET))
+
+def test_trailing_content_after_receipts_block_is_denied():
+    tool, args = payload(RECEIPTS); args["body"] += "\nExtra note after the block."
+    assert "NO_RECEIPTS" in codes(check_payload(tool, args, TARGET))
+
+def test_multiple_receipts_blocks_are_denied():
+    tool, args = payload(RECEIPTS); args["body"] += "\n```receipts\n{\"bad\": true}\n```"
+    assert "NO_RECEIPTS" in codes(check_payload(tool, args, TARGET))
+
+def test_missing_owner_and_repo_in_payload_is_fatal():
+    tool, args = payload(RECEIPTS); args.pop("owner", None); args.pop("repo", None)
+    assert "SCOPE_MISSING" in codes(check_payload(tool, args, TARGET))
+
+def test_missing_issue_number_in_payload_is_fatal():
+    tool, args = payload(RECEIPTS); args.pop("issue_number")
+    assert "SCOPE_MISSING" in codes(check_payload(tool, args, TARGET))

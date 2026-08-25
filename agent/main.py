@@ -219,7 +219,7 @@ def stream_turn(client: TrueForgeClient, session_id: str, input_items: list[dict
     return required, index, output
 
 
-def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[str, Any]], audit: AuditLog, auto_approve: bool) -> list[dict[str, Any]]:
+def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[str, Any]], audit: AuditLog, auto_approve: bool, target: Target = Target()) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for action in required:
         action_type = action.get("type")
@@ -230,10 +230,19 @@ def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[
         for pending in action.get("tool_calls", []):
             tool_name, arguments = lookup_call(index, pending)
             if action_type == "tool.approval_required":
-                show_approval_request(tool_name, arguments)
+                violations = policy.check_payload(tool_name, lookup_arguments(index, pending), target)
+                if violations:
+                    deny_reason = policy.format_deny_reason(violations)
+                    show_violations(violations, "POLICY GATE DENIED")
+                    console.print(Panel(deny_reason, title="[bold red]DENIED BY POLICY[/bold red]", border_style="red"))
+                    decision: dict[str, Any] = {"status": "deny", "reason": deny_reason}
+                    audit.write("decision", {"tool": tool_name, "decision": decision, "policy": "deny", "auto": auto_approve})
+                    items.append({"type": "user.tool_approval", "thread_id": thread_id, "tool_call_id": pending["id"], "approval": decision})
+                    continue
+                show_approval_request(tool_name, arguments, clean=True)
                 if auto_approve:
                     console.print("[yellow]auto-approve enabled; allowing[/yellow]")
-                    decision: dict[str, Any] = {"status": "allow"}
+                    decision = {"status": "allow"}
                 else:
                     answer = console.input("\n[bold]Approve this call?[/bold] [green]y[/green] to post, [red]n[/red] to deny: ").strip().lower()
                     if answer == "y":
@@ -292,7 +301,7 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
             if not required:
                 persist_receipts(output, repo, pr, session_id)
                 return output
-            input_items = collect_decisions(required, index, audit, auto_approve)
+            input_items = collect_decisions(required, index, audit, auto_approve, Target(repo=repo, pr=pr))
             if not input_items:
                 persist_receipts(output, repo, pr, session_id)
                 return output
