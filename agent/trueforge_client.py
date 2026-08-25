@@ -88,7 +88,7 @@ class TrueForgeClient:
         for path in candidates:
             try:
                 body = self._request("GET", path)
-            except TrueForgeError as exc:
+            except (TrueForgeError, httpx.HTTPError) as exc:
                 last_error = exc
                 continue
             data = body.get("data", body)
