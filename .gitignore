@@ -1,7 +1,7 @@
 .env
-pycache/
-.pyc
+__pycache__/
+*.pyc
 .venv/
-runs/.jsonl
+runs/*.jsonl
 !runs/demo-run.jsonl
 .pytest_cache/
