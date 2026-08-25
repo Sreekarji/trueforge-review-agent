@@ -29,13 +29,15 @@ MAX_ARG_CHARS = 4000
 
 REVIEW_PROMPT = (
     "Review pull request #{pr} in {repo}.\n\n"
-    "For every issue you suspect, write a minimal failing test in the sandbox "
-    "that proves it against the code on this PR's head, and run it. Report only "
-    "findings you reproduced, and include the exact command and its real output "
-    "as evidence. Say explicitly how many hypotheses you dropped because the "
-    "reproduction passed.\n\n"
-    "Then post the review as a single comment on the pull request. I will "
-    "approve before anything is written to GitHub."
+    "Prove every hypothesis three times in the sandbox: the reproduction must "
+    "PASS against the base branch version of the file, FAIL against this PR's "
+    "head, and PASS again once your proposed fix is applied. Fan the proofs out "
+    "to one subagent per hypothesis. Report only what you executed, with the "
+    "real commands and output, and say how many hypotheses you dropped because "
+    "the reproduction passed on head.\n\n"
+    "Then post the review as a single comment on the pull request, ending with "
+    "the machine-readable receipts block. I will approve before anything is "
+    "written to GitHub."
 )
 
 
@@ -123,9 +125,14 @@ def render_event(event: dict[str, Any], index: dict[str, dict[str, Any]]) -> Non
     elif event_type == "sandbox.created":
         console.print(Panel(f"sandbox id: {event.get('sandbox_id', '?')}", title="[bold green]SANDBOX PROVISIONED[/bold green]", border_style="green"))
     elif event_type == "thread.created":
-        console.print(f"[magenta]subagent started:[/magenta] {event.get('title', '?')}")
+        console.print(
+            f"\n[magenta]|-- proof subagent[/magenta] {event.get('title', '?')} "
+            f"[dim]({event.get('thread_id', '?')})[/dim]"
+        )
     elif event_type == "thread.done":
-        console.print("[magenta]subagent finished[/magenta]")
+        state = event.get("state") or {}
+        mark = "[green]done[/green]" if state.get("status") == "done" else "[red]error[/red]"
+        console.print(f"[magenta]|-- proof subagent {mark}[/magenta] {event.get('thread_id', '?')}")
     elif event_type == "model.message":
         index[event["id"]] = event
         if event.get("content"):
@@ -143,8 +150,17 @@ def render_event(event: dict[str, Any], index: dict[str, dict[str, Any]]) -> Non
     elif event_type == "tool.approval_required":
         console.print("\n[bold yellow]-- paused for approval --[/bold yellow]")
     elif event_type == "turn.done":
-        status = (event.get("state") or {}).get("status", "?")
-        console.print(f"\n[dim]turn finished: {status}[/dim]")
+        state = event.get("state") or {}
+        status = state.get("status", "?")
+        metrics = state.get("metrics") or {}
+        cost = metrics.get("total_cost_in_usd")
+        tokens = metrics.get("total_tokens")
+        extra = ""
+        if tokens is not None:
+            extra = f" | {tokens} tokens"
+        if cost is not None:
+            extra += f" | ${float(cost):.4f}"
+        console.print(f"\n[dim]turn finished: {status}{extra}[/dim]")
 
 
 def show_approval_request(tool_name: str, arguments: str) -> None:
