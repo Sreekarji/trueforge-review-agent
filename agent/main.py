@@ -262,19 +262,18 @@ def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[
     return items
 
 
-def persist_receipts(output: str, repo: str, pr: str, session_id: str) -> None:
-    """Persist the receipts block of a finished review comment, if present."""
+def extract_receipts_block(output: str) -> dict[str, Any] | None:
+    """Return the receipts JSON object from a finished review comment, if present."""
     match = RECEIPTS_BLOCK.search(output or "")
     if match is None:
-        return
+        return None
     try:
         receipts_data = json.loads(match.group(1))
     except json.JSONDecodeError:
-        return
+        return None
     if not isinstance(receipts_data, dict):
-        return
-    path = receipts_store.save(receipts_data, repo, pr, session_id)
-    console.print(f"[green]receipts persisted:[/green] {path}")
+        return None
+    return receipts_data
 
 
 @dataclass
@@ -286,8 +285,13 @@ class GateState:
     approved_receipts: dict[str, Any] | None = None
 
 
-def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10) -> str:
-    session = client.create_session(agent_name)
+def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None) -> str:
+    gate = GateState()
+    target = Target(repo=repo, pr=pr)
+    if resume_session_id:
+        session = {"id": resume_session_id}
+    else:
+        session = client.create_session(agent_name)
     session_id = session["id"]
     safe_session_id = session_id.replace("/", "_").replace(".", "_")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -299,13 +303,18 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
         for _ in range(max_pauses):
             required, index, output = stream_turn(client, session_id, input_items, audit)
             if not required:
-                persist_receipts(output, repo, pr, session_id)
-                return output
-            input_items = collect_decisions(required, index, audit, auto_approve, Target(repo=repo, pr=pr))
+                break
+            input_items = collect_decisions(required, index, audit, auto_approve, target)
             if not input_items:
-                persist_receipts(output, repo, pr, session_id)
-                return output
-        raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
+                break
+        else:
+            raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
+        gate.approved_receipts = extract_receipts_block(output)
+        if gate.approved_receipts is not None:
+            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id or "")
+            console.print(receipts_store.summary_table(gate.approved_receipts, title="Posted receipts"))
+            console.print(f"[green]receipts saved:[/green] {path}")
+        return output
     finally:
         audit.close()
 
@@ -348,23 +357,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show-gate", action="store_true")
     parser.add_argument("--show-policy", action="store_true")
     parser.add_argument("--replay", type=Path, default=None)
-    parser.add_argument("--verify", type=Path, default=None)
+    parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--receipts", type=Path, default=None)
     parser.add_argument("--auto-approve", action="store_true")
     args = parser.parse_args(argv)
-
-    if args.verify:
-        if not args.verify.exists():
-            print(f"error: no such receipts artifact: {args.verify}", file=sys.stderr)
-            return 2
-        try:
-            artifact = receipts_store.load(args.verify)
-        except (ValueError, json.JSONDecodeError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts artifact: {args.verify}"))
-        console.print()
-        console.print(receipts_store.verification_prompt(artifact))
-        return 0
 
     if args.replay:
         if not args.replay.exists():
@@ -405,13 +401,26 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         prompt = REVIEW_PROMPT.format(repo=args.repo, pr=args.pr)
 
+    target = Target(repo=args.repo, pr=str(args.pr))
+    session_id = None
+
+    if args.verify:
+        path = args.receipts or receipts_store.artifact_path(target.repo, target.pr)
+        if not path.exists():
+            print(f"error: no receipts artifact at {path}; run a review first", file=sys.stderr)
+            return 2
+        artifact = receipts_store.load(path)
+        session_id = artifact.get("session_id") or None
+        prompt = receipts_store.verification_prompt(artifact)
+        console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts on file ({path})"))
+
     with build_client() as client:
         if not client.health():
             print(f"error: no TrueForge server at {client.base_url}", file=sys.stderr)
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
-            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr)
+            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr, resume_session_id=session_id)
         except TrueForgeError as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1

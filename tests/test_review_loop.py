@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import pytest
 from agent import receipts
-from agent.main import lookup_call, merge_delta, persist_receipts, redact
+from agent.main import extract_receipts_block, lookup_call, merge_delta, redact
 from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
@@ -56,23 +56,18 @@ def test_artifact_path_hashes_full_repo_identifier() -> None:
     assert left.name.startswith("receipts-foo-bar-baz-")
 
 
-def test_persist_receipts_extracts_block_and_saves(monkeypatch, tmp_path) -> None:
-    captured: dict = {}
-    def fake_save(data, repo, pr, session_id, directory=Path("runs")):
-        captured["data"] = data
-        captured["repo"] = repo
-        captured["pr"] = pr
-        return tmp_path / "artifact.json"
-    monkeypatch.setattr(receipts, "save", fake_save)
+def test_extract_receipts_block_returns_parsed_dict() -> None:
     body = "## Review\n\n```receipts\n" + json.dumps({"schema": "receipts/v1", "counts": {}, "findings": []}) + "\n```"
-    persist_receipts(body, "owner/repo", "7", "sess-1")
-    assert captured["data"]["schema"] == "receipts/v1"
-    assert captured["repo"] == "owner/repo" and captured["pr"] == "7"
+    assert extract_receipts_block(body) == {"schema": "receipts/v1", "counts": {}, "findings": []}
 
 
-def test_persist_receipts_ignores_comment_without_block(monkeypatch) -> None:
-    monkeypatch.setattr(receipts, "save", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not save")))
-    persist_receipts("Just a normal comment.", "owner/repo", "7", "sess-1")
+def test_extract_receipts_block_returns_none_without_block() -> None:
+    assert extract_receipts_block("Just a normal comment.") is None
+
+
+def test_iteration_limit_leaves_room_for_three_runs_per_hypothesis() -> None:
+    _, manifest = load_spec(SPEC, ENV)
+    assert manifest["config"]["iteration_limit"] >= 100
 
 
 def test_unfixed_findings_drop_fix_diff_and_patched_run(tmp_path) -> None:
