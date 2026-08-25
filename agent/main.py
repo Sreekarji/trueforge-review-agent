@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with build_client() as client:
         if not client.health():
-            print("error: no TrueForge server at http://localhost:8790", file=sys.stderr)
+            print(f"error: no TrueForge server at {client.base_url}", file=sys.stderr)
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
