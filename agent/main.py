@@ -206,8 +206,9 @@ def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[
 def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, max_pauses: int = 10) -> str:
     session = client.create_session(agent_name)
     session_id = session["id"]
+    safe_session_id = session_id.replace("/", "_").replace(".", "_")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    audit = AuditLog(RUNS_DIR / f"{stamp}-{session_id}.jsonl")
+    audit = AuditLog(RUNS_DIR / f"{stamp}-{safe_session_id}.jsonl")
     console.print(Panel(f"agent: [bold]{agent_name}[/bold]\nsession: {session_id}\naudit log: {audit.path}", title="[bold]RECEIPTS[/bold]", border_style="blue"))
     try:
         audit.write("prompt", prompt)
