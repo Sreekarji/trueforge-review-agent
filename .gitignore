@@ -1,0 +1,7 @@
+.env
+pycache/
+.pyc
+.venv/
+runs/.jsonl
+!runs/demo-run.jsonl
+.pytest_cache/
