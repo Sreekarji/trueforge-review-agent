@@ -2,7 +2,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import pytest
-from agent.main import lookup_call, merge_delta, redact
+from agent import receipts
+from agent.main import lookup_call, merge_delta, persist_receipts, redact
 from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
@@ -46,3 +47,46 @@ def test_lookup_call_resolves_name_and_redacts_arguments() -> None:
 
 def test_lookup_call_degrades_gracefully_on_unknown_event() -> None:
     assert lookup_call({}, {"id": "c9", "source_event_id": "nope"})[0] == "<unknown tool>"
+
+
+def test_artifact_path_hashes_full_repo_identifier() -> None:
+    left = receipts.artifact_path("foo/bar-baz", "1")
+    right = receipts.artifact_path("foo-bar/baz", "1")
+    assert left != right, "slug collision must not produce the same artifact path"
+    assert left.name.startswith("receipts-foo-bar-baz-")
+
+
+def test_persist_receipts_extracts_block_and_saves(monkeypatch, tmp_path) -> None:
+    captured: dict = {}
+    def fake_save(data, repo, pr, session_id, directory=Path("runs")):
+        captured["data"] = data
+        captured["repo"] = repo
+        captured["pr"] = pr
+        return tmp_path / "artifact.json"
+    monkeypatch.setattr(receipts, "save", fake_save)
+    body = "## Review\n\n```receipts\n" + json.dumps({"schema": "receipts/v1", "counts": {}, "findings": []}) + "\n```"
+    persist_receipts(body, "owner/repo", "7", "sess-1")
+    assert captured["data"]["schema"] == "receipts/v1"
+    assert captured["repo"] == "owner/repo" and captured["pr"] == "7"
+
+
+def test_persist_receipts_ignores_comment_without_block(monkeypatch) -> None:
+    monkeypatch.setattr(receipts, "save", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not save")))
+    persist_receipts("Just a normal comment.", "owner/repo", "7", "sess-1")
+
+
+def test_unfixed_findings_drop_fix_diff_and_patched_run(tmp_path) -> None:
+    payload = {"schema": "receipts/v1", "findings": [
+        {"id": "U1", "verdict": "UNFIXED",
+         "fix_diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-foo\n+bar",
+         "runs": {"head": {"outcome": "fail"}, "patched": {"outcome": "pass"}}},
+        {"id": "R1", "verdict": "REGRESSION",
+         "fix_diff": "--- a/x\n+++ b/x",
+         "runs": {"head": {}, "base": {}, "patched": {}}},
+    ]}
+    stored = receipts.load(receipts.save(payload, "owner/repo", "3", "s1", directory=tmp_path))["receipts"]
+    unfixed = stored["findings"][0]
+    assert "fix_diff" not in unfixed
+    assert "patched" not in unfixed["runs"]
+    regression = stored["findings"][1]
+    assert regression["fix_diff"] and "patched" in regression["runs"]
