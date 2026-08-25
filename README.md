@@ -1,124 +1,82 @@
-# TrueForge Review Agent
+# Receipts — an evidence-first PR review agent on TrueForge
 
-**AI-powered code review agent built on TrueForge for the Agent Harness Hackathon**
+Most AI code review is unfalsifiable. It says "this may cause a race condition"
+and leaves a human to find out. Receipts is a review agent with one rule:
 
-## What It Does
+> **A finding is not reported unless a test written and run in a sandbox reproduced it.**
 
-TrueForge Review Agent is an autonomous code review assistant. Point it at any GitHub repository and it will:
+Every hypothesis is proven, refuted, or explicitly labelled unverified. Refuted
+findings are deleted and counted, so you can see how much noise was suppressed.
+Nothing reaches GitHub until a human approves the exact payload.
 
-- 🔍 **Explore the codebase** — list repository structure, read source files, and trace the architecture of the main components.
-- 🐛 **Find bugs** — detect logic errors, tensor/shape mistakes, device and gradient issues, security holes, and performance bottlenecks.
-- 📊 **Produce structured reviews** — every finding is severity-ranked (Critical / High / Medium / Low) with the affected file, approximate line number, a code snippet, an explanation, and a suggested fix.
-- 🧠 **Ground the review with research** — enrich findings with up-to-date documentation and web context before finalizing recommendations.
-- ✅ **Respect the human-in-the-loop** — reviews are presented for approval before anything is posted back to GitHub as an issue or comment.
+## What the harness does
 
-## How to Run with TrueForge
-
-### Prerequisites
-
-- Python 3.10+
-- A [TrueForge](https://trueforge.example) installation (agent harness runtime)
-- MCP servers configured for **GitHub**, **Exa**, and **DeepWiki** (see below)
-- A GitHub Personal Access Token with `repo` and `issues:write` scopes
-
-### Setup
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/Sreekarji/trueforge-review-agent.git
-cd trueforge-review-agent
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure environment
-export GITHUB_TOKEN=ghp_xxx          # GitHub PAT (repo, issues:write)
-export EXA_API_KEY=xxx               # Exa search API key
-export DEEPWIKI_TOKEN=xxx            # DeepWiki access token
-
-# 4. Register MCP servers in your TrueForge config (trueforge.yaml)
-mcp:
-  github:
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
-  exa:
-    command: npx
-    args: ["-y", "mcp-exa"]
-    env:
-      EXA_API_KEY: ${EXA_API_KEY}
-  deepwiki:
-    command: npx
-    args: ["-y", "@deepwiki/mcp-server"]
-    env:
-      DEEPWIKI_TOKEN: ${DEEPWIKI_TOKEN}
-```
-
-### Running the agent
-
-```bash
-# Review a repository and print the report
-trueforge run agent --repo https://github.com/owner/repo
-
-# Review only specific files
-trueforge run agent --repo https://github.com/owner/repo --files "src/model.py,src/train.py"
-
-# Generate a report and save it locally (no posting to GitHub)
-trueforge run agent --repo https://github.com/owner/repo --output review.md
-
-# Full flow: review, ask for approval, then post as a GitHub issue
-trueforge run agent --repo https://github.com/owner/repo --post-issue
-```
-
-The agent always **asks for explicit approval before posting** any comments or issues to GitHub.
-
-## MCP Tools Used
-
-The agent uses three MCP (Model Context Protocol) servers to gather context and act on repositories:
-
-| MCP Server | Role in the Agent |
+| Capability | How Receipts uses it |
 |---|---|
-| **GitHub** | Lists repository contents, reads source files, fetches metadata, and (with approval) posts issues and PR comments. The primary data source for the review. |
-| **Exa** | Web search and page fetch — used to research libraries, reproduce known CVEs, check current best practices, and validate whether a flagged issue is a real-world problem. |
-| **DeepWiki** | Deep documentation retrieval — used to look up framework internals (e.g., PyTorch module behavior, library APIs) so findings are grounded in official docs rather than guesswork. |
+| MCP tools | GitHub connector reads the PR, its diff, and file contents. DeepWiki for unfamiliar dependencies. |
+| Sandbox | Every reproduction runs in an isolated sandbox — the only place agent-written code executes. |
+| Approval gate | `require_approval_for_tools` pauses before any GitHub write. Payload shown in full before you decide. |
+| Subagents | More than six hypotheses fan out to parallel proof runs. |
+| Session state | Each approval round is a new turn chained to the same session. |
 
-## Agent Flow
+TrueForge runs the loop. This repo contributes an agent spec, a driver, and a policy — roughly 600 lines, none of it re-implementing a harness.
 
-```text
-User: "Review https://github.com/owner/repo"
-  │
-  ▼
-[1] GitHub  ──► list repo structure, read main source files
-  │
-  ▼
-[2] DeepWiki ─► fetch framework/library docs for referenced APIs
-  │
-  ▼
-[3] Exa     ──► search for known issues / best practices / CVEs
-  │
-  ▼
-[4] Analyze ──► bug hunting, code-quality pass, performance review
-  │
-  ▼
-[5] Report  ──► severity-ranked findings + suggested fixes
-  │
-  ▼
-[6] Ask user for approval to post → GitHub issue / PR comments
+## Run it in 5 minutes
+
+### No keys? Watch a recorded run (30 seconds)
+
+```bash
+pip install -r requirements.txt
+python -m agent.main --replay runs/demo-run.jsonl
 ```
 
-## Project Structure
+This re-renders a real run from its audit log: sandbox provisioning, reproductions, the approval gate, and the human decision. No server, no model, no credentials needed.
 
-```text
-trueforge-review-agent/
-├── agent/          # Agent logic (review pipeline)
-├── tools/          # MCP client wrappers (github, exa, deepwiki)
-├── config/         # Agent prompts and TrueForge config
-├── tests/          # Unit tests
-├── trueforge.yaml  # TrueForge + MCP server configuration
-└── requirements.txt
+### Full run
+
+**Prerequisites:** Node 22+, Python 3.10+, a GitHub fine-grained PAT, an OpenAI-compatible model key, and a Daytona API key (free tier) for the sandbox.
+
+1. **Start the harness.**
+```bash
+   npx @truefoundry/trueforge   # opens http://localhost:8790
 ```
 
-## License
+2. **Configure in the UI** (credentials stay here, never in this repo):
+   - Settings → Models → Add custom provider: your base URL and key. Copy the model FQN.
+   - Settings → Connectors → github: header auth, `Authorization: Bearer <your PAT>`. Fine-grained, Pull requests and Issues read+write.
+   - Settings → Sandbox providers → Daytona: your API key.
 
-MIT
+3. **Configure this repo.**
+```bash
+   cp .env.example .env   # set TRUEFORGE_MODEL to the FQN from step 2
+   pip install -r requirements.txt
+```
+
+4. **Register the agent and check the safety policy.**
+```bash
+   python -m agent.provision
+   python -m agent.main --show-gate
+```
+
+5. **Review a PR.**
+```bash
+   python -m agent.main --repo Sreekarji/trueforge-review-agent --pr 2
+```
+
+You will see connectors initialise, a sandbox provision, reproductions run, then the run **stop** with the full comment payload on screen. Type `y` to post or `n` to deny.
+
+## The review target
+
+PR #2 (`demo/buggy-metrics-pr`) is deliberately buggy and deliberately unmerged. Its existing tests all pass, so the agent cannot cheat — it has to write new ones. There are three real defects and at least one plausible-but-wrong hypothesis, making the refutation count meaningful.
+
+## Safety model
+
+- **The gate is server-side.** `require_approval_for_tools` is enforced by the harness, not by this client. A bug in `main.py` cannot post without approval.
+- **Least privilege.** Reads are broad; every write tool is named in the gate.
+- **Credentials never enter the sandbox.** Model and MCP credentials stay in the harness.
+- **Everything is logged.** Each run writes `runs/<timestamp>-<session>.jsonl`, redacted.
+- **Auto-approve is deliberately awkward.** Requires both `--auto-approve` and `RECEIPTS_ALLOW_AUTO_APPROVE=1`.
+
+## Development
+
+Every change went through a pull request reviewed by Qodo before merge. Tests: `python -m pytest -q`.
