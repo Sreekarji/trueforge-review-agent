@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -21,7 +22,33 @@ def slug(value: str) -> str:
 
 
 def artifact_path(repo: str, pr: str, directory: Path = ARTIFACT_DIR) -> Path:
-    return directory / f"receipts-{slug(repo)}-pr{slug(str(pr))}.json"
+    # Stable hash of the FULL repo identifier so owner/name pairs that slug to
+    # the same string (foo/bar-baz vs foo-bar/baz) can never share a path.
+    digest = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:10]
+    return directory / f"receipts-{slug(repo)}-{digest}-pr{slug(str(pr))}.json"
+
+
+def _normalize_unfixed(receipts: dict[str, Any]) -> dict[str, Any]:
+    """UNFIXED findings carry no fix: drop fix_diff and the patched run.
+
+    The receipts/v1 schema allows both fields to be absent for UNFIXED, so a
+    stored artifact never implies a fix or a green patched run that does not
+    exist. The caller's dict is not mutated.
+    """
+    findings = receipts.get("findings")
+    if not isinstance(findings, list):
+        return receipts
+    normalized: list[Any] = []
+    for finding in findings:
+        if isinstance(finding, dict) and str(finding.get("verdict", "")).strip().upper() == "UNFIXED":
+            cleaned = {key: value for key, value in finding.items() if key != "fix_diff"}
+            runs = cleaned.get("runs")
+            if isinstance(runs, dict):
+                cleaned["runs"] = {key: value for key, value in runs.items() if key != "patched"}
+            normalized.append(cleaned)
+        else:
+            normalized.append(finding)
+    return {**receipts, "findings": normalized}
 
 
 def save(receipts: dict[str, Any], repo: str, pr: str, session_id: str, directory: Path = ARTIFACT_DIR) -> Path:
@@ -32,7 +59,7 @@ def save(receipts: dict[str, Any], repo: str, pr: str, session_id: str, director
         "repo": receipts.get("repo") or repo,
         "pr": receipts.get("pr") or pr,
         "session_id": session_id,
-        "receipts": receipts,
+        "receipts": _normalize_unfixed(receipts),
     }
     path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
     return path

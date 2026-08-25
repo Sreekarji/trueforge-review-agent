@@ -80,21 +80,25 @@ manifest:
 
     Phase 3 - Differential proof. For EVERY hypothesis, delegate one subagent
     per hypothesis so proofs run in parallel. Each subagent works in its own
-    directory /work/<finding-id>/ and performs exactly three runs:
+    directory /work/<finding-id>/ and performs at most three runs:
 
-      RUN head    - write the head version of the file, write a minimal pytest
-                    that fails if and only if the defect is real, run it.
-                    Expect FAIL. If it PASSES the hypothesis is REFUTED: stop,
-                    report REFUTED, write nothing to the report.
-      RUN base    - same test file, unchanged, against the BASE version of the
-                    source file. PASS means this PR introduced the defect.
-                    FAIL means the defect predates this PR.
-      RUN patched - apply your proposed fix to the head version, rerun the same
-                    unchanged test. It must PASS. If it does not, you have no
-                    fix: verdict UNFIXED and no diff.
+      RUN head    - write every changed file at its HEAD revision, write a
+                    minimal pytest that fails if and only if the defect is
+                    real, run it. Expect FAIL. If it PASSES the hypothesis is
+                    REFUTED: stop, report REFUTED, write nothing to the report.
+      RUN base    - same test file, unchanged. Materialize EVERY file the PR
+                    changes at its BASE revision (same paths, ref = base SHA),
+                    not just the file under test: modules the reproduction
+                    imports must not mix revisions. PASS means this PR
+                    introduced the defect; FAIL means it predates it.
+      RUN patched - apply your proposed fix to the head revision, rerun the
+                    same unchanged test. It must PASS. If it does not, you have
+                    no fix: verdict UNFIXED and no diff. Only REGRESSION and
+                    PRE-EXISTING require this run.
 
-    Capture for each run the exact command, the exit code, and at most 20 lines
-    of real output. Never paraphrase output. Never invent a run you did not do.
+    Capture for each executed run the exact command, the exit code, and at most
+    20 lines of real output. Never paraphrase output. Never invent a run you
+    did not do. UNVERIFIED findings (no sandbox) carry no runs at all.
 
     Assign exactly one verdict:
       REGRESSION    head FAIL, base PASS, patched PASS  -> introduced here
@@ -109,8 +113,9 @@ manifest:
       - A table: Severity | File:line | Claim | base | head | patched | Verdict.
       - "Hypotheses raised: N. Confirmed: N. Refuted and dropped: N. Unverified: N."
       - Per reported finding: what breaks, the user-visible impact, a fenced
-        evidence block with the real commands and output for each of the three
-        runs, and the verified fix as a unified diff.
+        evidence block with the real commands and output for each executed
+        run, and the verified fix as a unified diff when one exists (UNFIXED
+        findings report no fix).
       - A footer naming the model and stating that a human approved the post.
 
     Then append, as the last thing in the comment, a fenced block tagged
@@ -142,6 +147,12 @@ manifest:
         }
       ]
     }
+
+    Optionality in this shape: UNFIXED findings omit the patched run and set
+    "fix_diff": null (the head-fail reproduction and its evidence are still
+    required). UNVERIFIED findings carry no "runs", "test_path" or
+    "test_source". REFUTED findings never appear in "findings" at all - they
+    are only counted in "counts.refuted".
 
     Phase 5 - Post. Call the pull request comment tool exactly once with the
     finished report. That call pauses for human approval. If the human denies

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from rich.table import Table
 
 from .provision import build_client, load_spec, SpecError
 from .trueforge_client import TrueForgeClient, TrueForgeError
+from . import receipts as receipts_store
 
 console = Console(highlight=False)
 RUNS_DIR = Path("runs")
@@ -26,15 +28,20 @@ RUNS_DIR = Path("runs")
 SENSITIVE_KEY_HINTS = ("token", "key", "secret", "password", "authorization", "pat")
 SECRET_PREFIXES = ("ghp_", "github_pat_", "sk-", "dtn_")
 MAX_ARG_CHARS = 4000
+RECEIPTS_BLOCK = re.compile(r"```receipts\s*\n(.*?)```", re.DOTALL)
 
 REVIEW_PROMPT = (
     "Review pull request #{pr} in {repo}.\n\n"
-    "Prove every hypothesis three times in the sandbox: the reproduction must "
-    "PASS against the base branch version of the file, FAIL against this PR's "
-    "head, and PASS again once your proposed fix is applied. Fan the proofs out "
-    "to one subagent per hypothesis. Report only what you executed, with the "
-    "real commands and output, and say how many hypotheses you dropped because "
-    "the reproduction passed on head.\n\n"
+    "Prove every hypothesis in the sandbox against this PR's head: write a "
+    "minimal pytest that fails if and only if the defect is real, and run it. "
+    "Classify each result with exactly one verdict: REGRESSION (base PASS, "
+    "head FAIL, patched PASS), PRE-EXISTING (base FAIL, head FAIL, patched "
+    "PASS), UNFIXED (head FAIL, no working patch - no fix diff), REFUTED "
+    "(head PASS - never reported, only counted), or UNVERIFIED (could not be "
+    "run - no evidence block). Only REGRESSION and PRE-EXISTING require the "
+    "patched run. Fan the proofs out to one subagent per hypothesis. Report "
+    "only what you executed, with the real commands and output, and say how "
+    "many hypotheses you dropped because the reproduction passed on head.\n\n"
     "Then post the review as a single comment on the pull request, ending with "
     "the machine-readable receipts block. I will approve before anything is "
     "written to GitHub."
@@ -219,7 +226,22 @@ def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[
     return items
 
 
-def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, max_pauses: int = 10) -> str:
+def persist_receipts(output: str, repo: str, pr: str, session_id: str) -> None:
+    """Persist the receipts block of a finished review comment, if present."""
+    match = RECEIPTS_BLOCK.search(output or "")
+    if match is None:
+        return
+    try:
+        receipts_data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return
+    if not isinstance(receipts_data, dict):
+        return
+    path = receipts_store.save(receipts_data, repo, pr, session_id)
+    console.print(f"[green]receipts persisted:[/green] {path}")
+
+
+def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10) -> str:
     session = client.create_session(agent_name)
     session_id = session["id"]
     safe_session_id = session_id.replace("/", "_").replace(".", "_")
@@ -232,9 +254,11 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
         for _ in range(max_pauses):
             required, index, output = stream_turn(client, session_id, input_items, audit)
             if not required:
+                persist_receipts(output, repo, pr, session_id)
                 return output
             input_items = collect_decisions(required, index, audit, auto_approve)
             if not input_items:
+                persist_receipts(output, repo, pr, session_id)
                 return output
         raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
     finally:
@@ -278,8 +302,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--show-gate", action="store_true")
     parser.add_argument("--replay", type=Path, default=None)
+    parser.add_argument("--verify", type=Path, default=None)
     parser.add_argument("--auto-approve", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.verify:
+        if not args.verify.exists():
+            print(f"error: no such receipts artifact: {args.verify}", file=sys.stderr)
+            return 2
+        try:
+            artifact = receipts_store.load(args.verify)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts artifact: {args.verify}"))
+        console.print()
+        console.print(receipts_store.verification_prompt(artifact))
+        return 0
 
     if args.replay:
         if not args.replay.exists():
@@ -316,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
-            output = run_review(client, agent_name, prompt, auto_approve)
+            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr)
         except TrueForgeError as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1
