@@ -49,3 +49,8 @@ def test_verification_prompt_carries_stored_tests():
 def test_summary_table_renders_all_findings():
     table = receipts_store.summary_table(RECEIPTS)
     assert table.row_count == 3
+
+def test_save_respects_explicit_path(tmp_path):
+    target = tmp_path / "custom" / "my-artifact.json"
+    path = receipts_store.save(RECEIPTS, "Sreekarji/trueforge-review-agent", "2", "s1", path=target)
+    assert path == target and target.exists()

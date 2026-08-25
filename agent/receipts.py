@@ -51,8 +51,9 @@ def _normalize_unfixed(receipts: dict[str, Any]) -> dict[str, Any]:
     return {**receipts, "findings": normalized}
 
 
-def save(receipts: dict[str, Any], repo: str, pr: str, session_id: str, directory: Path = ARTIFACT_DIR) -> Path:
-    path = artifact_path(repo, pr, directory)
+def save(receipts: dict[str, Any], repo: str, pr: str, session_id: str, directory: Path = ARTIFACT_DIR, path: Path | None = None) -> Path:
+    if path is None:
+        path = artifact_path(repo, pr, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     artifact = {
         "saved_at": datetime.now(timezone.utc).isoformat(),

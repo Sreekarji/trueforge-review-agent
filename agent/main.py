@@ -285,7 +285,7 @@ class GateState:
     approved_receipts: dict[str, Any] | None = None
 
 
-def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None) -> str:
+def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None, save_path: Path | None = None) -> str:
     gate = GateState()
     target = Target(repo=repo, pr=pr)
     if resume_session_id:
@@ -311,7 +311,7 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
             raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
         gate.approved_receipts = extract_receipts_block(output)
         if gate.approved_receipts is not None:
-            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id or "")
+            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id or "", path=save_path)
             console.print(receipts_store.summary_table(gate.approved_receipts, title="Posted receipts"))
             console.print(f"[green]receipts saved:[/green] {path}")
         return output
@@ -395,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     prompt = args.prompt
-    if prompt is None:
+    if prompt is None and not args.verify:
         if not args.repo or not args.pr:
             print("error: pass --repo and --pr, or set them in .env", file=sys.stderr)
             return 2
@@ -403,16 +403,41 @@ def main(argv: list[str] | None = None) -> int:
 
     target = Target(repo=args.repo, pr=str(args.pr))
     session_id = None
+    artifact_save_path: Path | None = None
 
     if args.verify:
-        path = args.receipts or receipts_store.artifact_path(target.repo, target.pr)
+        if args.receipts:
+            path = args.receipts
+        else:
+            if not args.repo or not args.pr:
+                print("error: --verify needs --repo and --pr (or --receipts) to locate the artifact", file=sys.stderr)
+                return 2
+            path = receipts_store.artifact_path(target.repo, target.pr)
         if not path.exists():
             print(f"error: no receipts artifact at {path}; run a review first", file=sys.stderr)
             return 2
-        artifact = receipts_store.load(path)
-        session_id = artifact.get("session_id") or None
-        prompt = receipts_store.verification_prompt(artifact)
-        console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts on file ({path})"))
+        try:
+            artifact = receipts_store.load(path)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"error: invalid receipts artifact at {path}: {exc}", file=sys.stderr)
+            return 2
+        try:
+            art_repo = str(artifact.get("receipts", {}).get("repo", ""))
+            art_pr = str(artifact.get("receipts", {}).get("pr", ""))
+            if args.repo and args.pr:
+                if art_repo != args.repo or art_pr != str(args.pr):
+                    print(f"error: artifact targets {art_repo}#{art_pr} but --repo/--pr specify {args.repo}#{args.pr}", file=sys.stderr)
+                    return 2
+            else:
+                args.repo, args.pr = art_repo, art_pr
+                target = Target(repo=art_repo, pr=art_pr)
+            artifact_save_path = path
+            session_id = artifact.get("session_id") or None
+            prompt = receipts_store.verification_prompt(artifact)
+            console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts on file ({path})"))
+        except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+            print(f"error: failed to process receipts artifact at {path}: {exc}", file=sys.stderr)
+            return 2
 
     with build_client() as client:
         if not client.health():
@@ -420,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
-            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr, resume_session_id=session_id)
+            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr, resume_session_id=session_id, save_path=artifact_save_path)
         except TrueForgeError as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1
