@@ -381,6 +381,7 @@ def run_review(
     session_id: str | None = None,
     repairs: int = 2,
     max_pauses: int = 10,
+    save_path: Path | None = None,
 ) -> str:
     if session_id:
         console.print(f"[cyan]resuming session[/cyan] {session_id}")
@@ -410,7 +411,7 @@ def run_review(
             raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
 
         if gate.approved_receipts is not None:
-            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id)
+            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id, path=save_path)
             audit.write("receipts_saved", {"path": str(path)})
             console.print(receipts_store.summary_table(gate.approved_receipts, title="Posted receipts"))
             console.print(
@@ -518,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
 
     target = Target(repo=args.repo, pr=str(args.pr))
     session_id = None
+    artifact_save_path: Path | None = None
 
     if args.verify:
         if args.receipts:
@@ -545,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 args.repo, args.pr = art_repo, art_pr
                 target = Target(repo=art_repo, pr=art_pr)
+            artifact_save_path = path
             session_id = artifact.get("session_id") or None
             prompt = receipts_store.verification_prompt(artifact)
             console.print(receipts_store.summary_table(artifact["receipts"], title=f"Receipts on file ({path})"))
@@ -558,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
-            output = run_review(client, agent_name, prompt, auto_approve, target, session_id=session_id)
+            output = run_review(client, agent_name, prompt, auto_approve, target, session_id=session_id, save_path=artifact_save_path)
         except TrueForgeError as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1
