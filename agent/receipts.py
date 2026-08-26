@@ -12,7 +12,6 @@ from typing import Any
 from rich.table import Table
 
 ARTIFACT_DIR = Path("runs")
-SCHEMA = "receipts/v1"
 PROVEN_VERDICTS = frozenset({"REGRESSION", "PRE-EXISTING", "UNFIXED", "FIXED", "STILL-FAILING"})
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 

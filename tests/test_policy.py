@@ -1,7 +1,6 @@
 from __future__ import annotations
 import copy
 import json
-import pytest
 from agent import policy
 from agent.policy import Target, check_payload, check_receipts, extract_receipts
 

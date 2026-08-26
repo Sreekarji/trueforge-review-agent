@@ -98,34 +98,40 @@ class TrueForgeClient:
         raise TrueForgeError(f"Could not list tools for {server_name!r}: {last_error}")
 
     def create_session(self, agent_name: str) -> dict[str, Any]:
-        return self._request("POST", "/api/v1/sessions", json={"agent": {"name": agent_name}})["data"]
-
-    def cancel_session(self, session_id: str) -> None:
-        self._request("POST", f"/api/v1/sessions/{session_id}/cancel")
+        body = self._request("POST", "/api/v1/sessions", json={"agent": {"name": agent_name}})
+        data = body.get("data", {})
+        if "id" not in data:
+            raise TrueForgeError(f"create_session: unexpected response shape (no 'id' in data): {body}")
+        return data
 
     def stream_turn(self, session_id: str, input_items: Sequence[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         payload = {"input": list(input_items), "stream": True}
         path = f"/api/v1/sessions/{session_id}/turns"
-        with self._http.stream("POST", path, json=payload, headers={"Accept": "text/event-stream"}) as response:
-            if response.status_code >= 400:
-                response.read()
-                raise TrueForgeError(f"POST {path} -> {response.status_code}: {response.text[:600]}")
-            buffer: list[str] = []
-            for raw_line in response.iter_lines():
-                line = raw_line.rstrip("\r")
-                if line.startswith(":"):
-                    continue
-                if line:
-                    if line.startswith("data:"):
-                        buffer.append(line[len("data:"):].lstrip())
-                    continue
-                event = _decode(buffer)
-                buffer = []
-                if event is not None:
-                    yield event
-            trailing = _decode(buffer)
-            if trailing is not None:
-                yield trailing
+        try:
+            with self._http.stream("POST", path, json=payload, headers={"Accept": "text/event-stream"}) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    raise TrueForgeError(f"POST {path} -> {response.status_code}: {response.text[:600]}")
+                buffer: list[str] = []
+                for raw_line in response.iter_lines():
+                    line = raw_line.rstrip("\r")
+                    if line.startswith(":"):
+                        continue
+                    if line:
+                        if line.startswith("data:"):
+                            buffer.append(line[len("data:"):].lstrip())
+                        continue
+                    event = _decode(buffer)
+                    buffer = []
+                    if event is not None:
+                        yield event
+                trailing = _decode(buffer)
+                if trailing is not None:
+                    yield trailing
+        except TrueForgeError:
+            raise
+        except httpx.HTTPError as exc:
+            raise TrueForgeError(f"stream_turn network error: {exc}") from exc
 
 
 def _decode(buffer: list[str]) -> dict[str, Any] | None:

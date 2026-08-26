@@ -145,6 +145,10 @@ manifest:
           },
           "fix_diff": "--- a/...\n+++ b/...\n@@ ..."
         }
+    FIXED and STILL-FAILING are also valid verdict values during a
+    re-verification pass (--verify). They require only a current-head
+    run (no base or patched run, no fix_diff). FIXED means the head
+    run now passes; STILL-FAILING means it still fails.
       ]
     }
 
