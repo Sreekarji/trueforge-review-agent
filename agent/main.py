@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -31,7 +30,6 @@ RUNS_DIR = Path("runs")
 SENSITIVE_KEY_HINTS = ("token", "key", "secret", "password", "authorization", "pat")
 SECRET_PREFIXES = ("ghp_", "github_pat_", "sk-", "dtn_")
 MAX_ARG_CHARS = 4000
-RECEIPTS_BLOCK = re.compile(r"```receipts\s*\n(.*?)```", re.DOTALL)
 
 REVIEW_PROMPT = (
     "Review pull request #{pr} in {repo}.\n\n"
@@ -251,7 +249,7 @@ def collect_decisions(
                 if violations:
                     show_violations(violations, "Policy gate violations")
 
-                decision = _decide(tool_name, violations, fatal, auto_approve, gate, audit)
+                decision = _decide(violations, fatal, auto_approve, gate)
                 if decision["status"] == "allow":
                     gate.approvals += 1
                     body = policy.body_of(raw_arguments)
@@ -289,12 +287,10 @@ def policy_safe(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decide(
-    tool_name: str,
     violations: list[Violation],
     fatal: bool,
     auto_approve: bool,
     gate: GateState,
-    audit: AuditLog,
 ) -> dict[str, Any]:
     if fatal:
         console.print(Panel(
@@ -328,7 +324,11 @@ def _decide(
         "\n[bold]Approve this call?[/bold] [green]y[/green] post, [red]n[/red] deny, "
         "[cyan]d F1,F2[/cyan] deny and drop those findings: "
     )
-    answer = console.input(prompt).strip()
+    try:
+        answer = console.input(prompt).strip()
+    except EOFError:
+        console.print("[yellow]stdin closed — auto-denying[/yellow]")
+        return {"status": "deny", "reason": "stdin closed"}
     lowered = answer.lower()
     if lowered == "y":
         if violations:
@@ -341,25 +341,14 @@ def _decide(
         if identifiers:
             console.print(f"[cyan]denying and asking for repost without {', '.join(identifiers)}[/cyan]")
             return {"status": "deny", "reason": policy.drop_reason(identifiers)}
-    reason = console.input("Reason for denial (optional): ").strip()
+    try:
+        reason = console.input("Reason for denial (optional): ").strip()
+    except EOFError:
+        reason = ""
     decision: dict[str, Any] = {"status": "deny"}
     if reason:
         decision["reason"] = reason
     return decision
-
-
-def extract_receipts_block(output: str) -> dict[str, Any] | None:
-    """Return the receipts JSON object from a finished review comment, if present."""
-    match = RECEIPTS_BLOCK.search(output or "")
-    if match is None:
-        return None
-    try:
-        receipts_data = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(receipts_data, dict):
-        return None
-    return receipts_data
 
 
 @dataclass
@@ -423,6 +412,8 @@ def run_review(
             f"[dim]gate: {gate.approvals} approved, {gate.denials} denied "
             f"({gate.policy_denials} by policy before a human was asked)[/dim]"
         )
+        if gate.approved_receipts is None and gate.denials > 0:
+            console.print("[yellow]All writes were denied. The agent was asked to print the report in chat — look for it in the output above.[/yellow]")
         return output
     finally:
         audit.close()
@@ -452,6 +443,10 @@ def replay(path: Path, delay: float = 0.02) -> None:
                         console.print(f"  [red]{line}[/red]")
             elif kind == "answer":
                 console.print(f"[cyan]human answered:[/cyan] {payload['answer']}")
+            elif kind == "target":
+                console.print(f"[dim]target: {payload}[/dim]")
+            elif kind == "receipts_saved":
+                console.print(f"[green]receipts saved:[/green] {payload.get('path', '?')}")
 
 
 def summarise_gate(manifest: dict[str, Any]) -> None:

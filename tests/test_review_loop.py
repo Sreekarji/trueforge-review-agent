@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import pytest
 from agent import receipts
-from agent.main import extract_receipts_block, lookup_call, merge_delta, redact
+from agent.main import lookup_call, merge_delta, redact
 from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
@@ -54,15 +54,6 @@ def test_artifact_path_hashes_full_repo_identifier() -> None:
     right = receipts.artifact_path("foo-bar/baz", "1")
     assert left != right, "slug collision must not produce the same artifact path"
     assert left.name.startswith("receipts-foo-bar-baz-")
-
-
-def test_extract_receipts_block_returns_parsed_dict() -> None:
-    body = "## Review\n\n```receipts\n" + json.dumps({"schema": "receipts/v1", "counts": {}, "findings": []}) + "\n```"
-    assert extract_receipts_block(body) == {"schema": "receipts/v1", "counts": {}, "findings": []}
-
-
-def test_extract_receipts_block_returns_none_without_block() -> None:
-    assert extract_receipts_block("Just a normal comment.") is None
 
 
 def test_iteration_limit_leaves_room_for_three_runs_per_hypothesis() -> None:
@@ -346,3 +337,76 @@ def test_verify_invalid_artifact_is_a_friendly_error(monkeypatch, tmp_path) -> N
     monkeypatch.setattr("agent.main.build_client", boom)
     rc = main(["--verify", "--receipts", str(junk), "--repo", "Sreekarji/trueforge-review-agent", "--pr", "2"])
     assert rc == 2
+
+
+def test_decide_eoferror_on_approval_prompt_auto_denies(tmp_path, monkeypatch) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
+    from agent.policy import Target
+    index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
+        {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"})}}]}}
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState(repairs_left=0)
+    call_count = 0
+    def raise_eof(prompt=""):
+        nonlocal call_count
+        call_count += 1
+        raise EOFError
+    monkeypatch.setattr("agent.main.console.input", raise_eof)
+    items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=False,
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
+    assert items[0]["approval"]["status"] == "deny"
+    assert items[0]["approval"]["reason"] == "stdin closed"
+
+
+def test_replay_renders_target_and_receipts_saved(tmp_path, monkeypatch) -> None:
+    from agent.main import replay
+    log = tmp_path / "run.jsonl"
+    import json as _json
+    lines = [
+        _json.dumps({"kind": "target", "payload": {"repo": "owner/repo", "pr": "1", "session_id": "s1"}}),
+        _json.dumps({"kind": "receipts_saved", "payload": {"path": "runs/artifact.json"}}),
+    ]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    printed: list[str] = []
+    monkeypatch.setattr("agent.main.console.print", lambda msg, **kw: printed.append(str(msg)))
+    replay(log, delay=0)
+    assert any("owner/repo" in p for p in printed)
+    assert any("runs/artifact.json" in p for p in printed)
+
+
+def test_unverified_finding_without_line_passes_policy() -> None:
+    from agent.policy import check_receipts, Target
+    import copy
+    r = {
+        "schema": "receipts/v1", "repo": "Sreekarji/trueforge-review-agent", "pr": "2",
+        "base_sha": "aaa", "head_sha": "bbb",
+        "counts": {"raised": 1, "confirmed": 0, "refuted": 0, "unverified": 1},
+        "findings": [{
+            "id": "U1", "severity": "low", "file": "metrics/io.py",
+            "claim": "could not be reproduced in sandbox", "verdict": "UNVERIFIED",
+        }],
+    }
+    violations = check_receipts(r, Target(repo="Sreekarji/trueforge-review-agent", pr="2"))
+    codes = {v.code for v in violations}
+    assert "MISSING_FIELD" not in codes
+
+
+def test_create_session_raises_on_missing_id(monkeypatch) -> None:
+    from agent.trueforge_client import TrueForgeClient, TrueForgeError
+    import unittest.mock as mock
+    client = TrueForgeClient.__new__(TrueForgeClient)
+    client._http = None
+    with mock.patch.object(client, "_request", return_value={"data": {}}):
+        with pytest.raises(TrueForgeError, match="no 'id'"):
+            client.create_session("agent")
+
+
+def test_stream_turn_wraps_httpx_error(monkeypatch) -> None:
+    from agent.trueforge_client import TrueForgeClient, TrueForgeError
+    import httpx, unittest.mock as mock
+    client = TrueForgeClient.__new__(TrueForgeClient)
+    http_mock = mock.MagicMock()
+    http_mock.stream.side_effect = httpx.ReadTimeout("timed out")
+    client._http = http_mock
+    with pytest.raises(TrueForgeError, match="stream_turn network error"):
+        list(client.stream_turn("sess", []))

@@ -130,9 +130,10 @@ def _finding_violations(finding: dict[str, Any], where: str) -> list[Violation]:
             found.append(Violation("MISSING_FIELD", f"{key} is required", where))
     if not str(finding.get("severity", "")).strip():
         found.append(Violation("MISSING_FIELD", "severity is required", where))
-    line = finding.get("line")
-    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
-        found.append(Violation("MISSING_FIELD", "line must be a positive integer", where))
+    if verdict != "UNVERIFIED":
+        line = finding.get("line")
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            found.append(Violation("MISSING_FIELD", "line must be a positive integer", where))
     has_diff = bool(str(finding.get("fix_diff", "")).strip())
     if has_diff and not rule.allows_fix_diff:
         found.append(Violation("UNPROVEN_FIX", f"a {verdict} finding may not ship a fix diff", where))

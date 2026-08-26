@@ -145,6 +145,10 @@ manifest:
           },
           "fix_diff": "--- a/...\n+++ b/...\n@@ ..."
         }
+    FIXED and STILL-FAILING are also valid verdict values during a
+    re-verification pass (--verify). They follow the same schema as
+    REGRESSION/PRE-EXISTING but indicate the finding was re-tested
+    against the new head and either resolved or still present.
       ]
     }
 
