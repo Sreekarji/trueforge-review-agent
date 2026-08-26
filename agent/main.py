@@ -372,21 +372,34 @@ class GateState:
     repair_spent: bool = False
 
 
-def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None, save_path: Path | None = None) -> str:
-    gate = GateState()
-    target = Target(repo=repo, pr=pr)
-    if resume_session_id:
-        session = {"id": resume_session_id}
+def run_review(
+    client: TrueForgeClient,
+    agent_name: str,
+    prompt: str,
+    auto_approve: bool,
+    target: Target,
+    session_id: str | None = None,
+    repairs: int = 2,
+    max_pauses: int = 10,
+    save_path: Path | None = None,
+) -> str:
+    if session_id:
+        console.print(f"[cyan]resuming session[/cyan] {session_id}")
     else:
-        session = client.create_session(agent_name)
-    session_id = session["id"]
+        session_id = client.create_session(agent_name)["id"]
     safe_session_id = session_id.replace("/", "_").replace(".", "_")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     audit = AuditLog(RUNS_DIR / f"{stamp}-{safe_session_id}.jsonl")
-    console.print(Panel(f"agent: [bold]{agent_name}[/bold]\nsession: {session_id}\naudit log: {audit.path}", title="[bold]RECEIPTS[/bold]", border_style="blue"))
+    gate = GateState(repairs_left=repairs)
+    console.print(Panel(
+        f"agent: [bold]{agent_name}[/bold]\nsession: {session_id}\n"
+        f"target: {target.repo or '?'} #{target.pr or '?'}\naudit log: {audit.path}",
+        title="[bold]RECEIPTS[/bold]", border_style="blue"))
     try:
         audit.write("prompt", prompt)
+        audit.write("target", {"repo": target.repo, "pr": target.pr, "session_id": session_id})
         input_items: list[dict[str, Any]] = [{"type": "user.message", "content": prompt}]
+        output = ""
         for _ in range(max_pauses):
             required, index, output = stream_turn(client, session_id, input_items, audit)
             if not required:
@@ -396,11 +409,20 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
                 break
         else:
             raise TrueForgeError(f"Still pausing after {max_pauses} rounds; stopping.")
-        gate.approved_receipts = extract_receipts_block(output)
+
         if gate.approved_receipts is not None:
-            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id or "", path=save_path)
+            path = receipts_store.save(gate.approved_receipts, target.repo, target.pr, session_id, path=save_path)
+            audit.write("receipts_saved", {"path": str(path)})
             console.print(receipts_store.summary_table(gate.approved_receipts, title="Posted receipts"))
-            console.print(f"[green]receipts saved:[/green] {path}")
+            console.print(
+                f"[green]receipts saved:[/green] {path}\n"
+                f"[dim]re-verify after the author pushes: "
+                f"python -m agent.main --repo {target.repo} --pr {target.pr} --verify[/dim]"
+            )
+        console.print(
+            f"[dim]gate: {gate.approvals} approved, {gate.denials} denied "
+            f"({gate.policy_denials} by policy before a human was asked)[/dim]"
+        )
         return output
     finally:
         audit.close()
@@ -539,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         try:
             client.upsert_agent(agent_name, manifest)
-            output = run_review(client, agent_name, prompt, auto_approve, repo=args.repo, pr=args.pr, resume_session_id=session_id, save_path=artifact_save_path)
+            output = run_review(client, agent_name, prompt, auto_approve, target, session_id=session_id, save_path=artifact_save_path)
         except TrueForgeError as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1
