@@ -79,7 +79,9 @@ manifest:
     then maintainability. Discard pure style opinions.
 
     Phase 3 - Differential proof. For EVERY hypothesis, delegate one subagent
-    per hypothesis so proofs run in parallel. Each subagent works in its own
+    per hypothesis. Run subagents sequentially, one at a time,
+    not in parallel. Wait for each subagent to complete before
+    starting the next. Each subagent works in its own
     directory /work/<finding-id>/ and performs at most three runs:
 
       RUN head    - write every changed file at its HEAD revision, write a
