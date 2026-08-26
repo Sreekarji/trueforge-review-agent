@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import pytest
 from agent import receipts
-from agent.main import lookup_call, merge_delta, persist_receipts, redact
+from agent.main import extract_receipts_block, lookup_call, merge_delta, redact
 from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
@@ -56,23 +56,18 @@ def test_artifact_path_hashes_full_repo_identifier() -> None:
     assert left.name.startswith("receipts-foo-bar-baz-")
 
 
-def test_persist_receipts_extracts_block_and_saves(monkeypatch, tmp_path) -> None:
-    captured: dict = {}
-    def fake_save(data, repo, pr, session_id, directory=Path("runs")):
-        captured["data"] = data
-        captured["repo"] = repo
-        captured["pr"] = pr
-        return tmp_path / "artifact.json"
-    monkeypatch.setattr(receipts, "save", fake_save)
+def test_extract_receipts_block_returns_parsed_dict() -> None:
     body = "## Review\n\n```receipts\n" + json.dumps({"schema": "receipts/v1", "counts": {}, "findings": []}) + "\n```"
-    persist_receipts(body, "owner/repo", "7", "sess-1")
-    assert captured["data"]["schema"] == "receipts/v1"
-    assert captured["repo"] == "owner/repo" and captured["pr"] == "7"
+    assert extract_receipts_block(body) == {"schema": "receipts/v1", "counts": {}, "findings": []}
 
 
-def test_persist_receipts_ignores_comment_without_block(monkeypatch) -> None:
-    monkeypatch.setattr(receipts, "save", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not save")))
-    persist_receipts("Just a normal comment.", "owner/repo", "7", "sess-1")
+def test_extract_receipts_block_returns_none_without_block() -> None:
+    assert extract_receipts_block("Just a normal comment.") is None
+
+
+def test_iteration_limit_leaves_room_for_three_runs_per_hypothesis() -> None:
+    _, manifest = load_spec(SPEC, ENV)
+    assert manifest["config"]["iteration_limit"] >= 100
 
 
 def test_unfixed_findings_drop_fix_diff_and_patched_run(tmp_path) -> None:
@@ -145,3 +140,54 @@ def test_collect_decisions_passes_clean_flag_and_allows(tmp_path, monkeypatch) -
                               target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"))
     assert items[0]["approval"]["status"] == "allow"
     assert captured["clean"] is True
+
+
+def _verify_artifact(tmp_path, repo, pr, session_id="sess_1"):
+    payload = {"schema": "receipts/v1", "repo": repo, "pr": pr, "base_sha": "aaa", "head_sha": "bbb",
+               "counts": {"raised": 0, "confirmed": 0, "refuted": 0, "unverified": 0}, "findings": []}
+    return receipts.save(payload, repo, str(pr), session_id, directory=tmp_path)
+
+
+def test_verify_rejects_artifact_target_mismatch(monkeypatch, tmp_path) -> None:
+    from agent.main import main
+    monkeypatch.setattr("agent.main.load_dotenv", lambda: None)
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+    path = _verify_artifact(tmp_path, "other/repo", 9)
+    def boom(*a, **k):
+        raise AssertionError("must not connect to the server on a mismatched artifact")
+    monkeypatch.setattr("agent.main.build_client", boom)
+    rc = main(["--verify", "--receipts", str(path), "--repo", "Sreekarji/trueforge-review-agent", "--pr", "2"])
+    assert rc == 2
+
+
+def test_verify_derives_target_from_artifact(monkeypatch, tmp_path) -> None:
+    from agent.main import main
+    monkeypatch.setattr("agent.main.load_dotenv", lambda: None)
+    monkeypatch.delenv("REVIEW_REPO", raising=False)
+    monkeypatch.delenv("REVIEW_PR", raising=False)
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+    path = _verify_artifact(tmp_path, "Sreekarji/trueforge-review-agent", 2)
+    class FakeClient:
+        base_url = "http://fake"
+        def health(self): return False
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+    monkeypatch.setattr("agent.main.build_client", lambda: FakeClient())
+    rc = main(["--verify", "--receipts", str(path)])
+    assert rc == 1  # got past artifact processing with derived target, then no server
+
+
+def test_verify_invalid_artifact_is_a_friendly_error(monkeypatch, tmp_path) -> None:
+    from agent.main import main
+    monkeypatch.setattr("agent.main.load_dotenv", lambda: None)
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+    junk = tmp_path / "junk.json"
+    junk.write_text("{not valid json", encoding="utf-8")
+    def boom(*a, **k):
+        raise AssertionError("must not connect to the server for an invalid artifact")
+    monkeypatch.setattr("agent.main.build_client", boom)
+    rc = main(["--verify", "--receipts", str(junk), "--repo", "Sreekarji/trueforge-review-agent", "--pr", "2"])
+    assert rc == 2
