@@ -219,47 +219,133 @@ def stream_turn(client: TrueForgeClient, session_id: str, input_items: list[dict
     return required, index, output
 
 
-def collect_decisions(required: Iterable[dict[str, Any]], index: dict[str, dict[str, Any]], audit: AuditLog, auto_approve: bool, target: Target = Target()) -> list[dict[str, Any]]:
+def collect_decisions(
+    required: Iterable[dict[str, Any]],
+    index: dict[str, dict[str, Any]],
+    audit: AuditLog,
+    auto_approve: bool,
+    target: Target,
+    gate: GateState,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    gate.repair_spent = False  # the repair budget is per agent turn, not per call in a batch
     for action in required:
         action_type = action.get("type")
         thread_id = action.get("thread_id") or "main"
         if action_type == "mcp.auth_required":
             urls = ", ".join(s.get("auth_url", "") for s in action.get("mcp_servers", []))
             raise TrueForgeError(f"Connector needs OAuth: {urls}")
+
         for pending in action.get("tool_calls", []):
             tool_name, arguments = lookup_call(index, pending)
+
             if action_type == "tool.approval_required":
-                violations = policy.check_payload(tool_name, lookup_arguments(index, pending), target)
+                raw_arguments = lookup_arguments(index, pending)
+                violations = policy.check_payload(tool_name, raw_arguments, target)
+                fatal = policy.has_fatal(violations)
+                audit.write("policy_check", {
+                    "tool": tool_name, "clean": not violations, "fatal": fatal,
+                    "violations": [v.render() for v in violations],
+                })
+                show_approval_request(tool_name, arguments, clean=not violations)
                 if violations:
-                    deny_reason = policy.format_deny_reason(violations)
-                    show_violations(violations, "POLICY GATE DENIED")
-                    console.print(Panel(deny_reason, title="[bold red]DENIED BY POLICY[/bold red]", border_style="red"))
-                    decision: dict[str, Any] = {"status": "deny", "reason": deny_reason}
-                    audit.write("decision", {"tool": tool_name, "decision": decision, "policy": "deny", "auto": auto_approve})
-                    items.append({"type": "user.tool_approval", "thread_id": thread_id, "tool_call_id": pending["id"], "approval": decision})
-                    continue
-                show_approval_request(tool_name, arguments, clean=True)
-                if auto_approve:
-                    console.print("[yellow]auto-approve enabled; allowing[/yellow]")
-                    decision = {"status": "allow"}
+                    show_violations(violations, "Policy gate violations")
+
+                decision = _decide(tool_name, violations, fatal, auto_approve, gate, audit)
+                if decision["status"] == "allow":
+                    gate.approvals += 1
+                    body = policy.body_of(raw_arguments)
+                    parsed, _ = policy.extract_receipts(body)
+                    if parsed:
+                        gate.approved_receipts = parsed
                 else:
-                    answer = console.input("\n[bold]Approve this call?[/bold] [green]y[/green] to post, [red]n[/red] to deny: ").strip().lower()
-                    if answer == "y":
-                        decision = {"status": "allow"}
-                    else:
-                        reason = console.input("Reason for denial (optional): ").strip()
-                        decision = {"status": "deny"}
-                        if reason:
-                            decision["reason"] = reason
-                audit.write("decision", {"tool": tool_name, "decision": decision, "auto": auto_approve})
-                items.append({"type": "user.tool_approval", "thread_id": thread_id, "tool_call_id": pending["id"], "approval": decision})
+                    gate.denials += 1
+                audit.write("decision", {"tool": tool_name, "decision": policy_safe(decision), "auto": auto_approve})
+                items.append({
+                    "type": "user.tool_approval",
+                    "thread_id": thread_id,
+                    "tool_call_id": pending["id"],
+                    "approval": decision,
+                })
+
             elif action_type == "tool.response_required":
                 console.print(Panel(arguments, title="[bold cyan]AGENT QUESTION[/bold cyan]"))
                 answer = console.input("[bold]Your answer:[/bold] ").strip()
                 audit.write("answer", {"tool": tool_name, "answer": answer})
-                items.append({"type": "user.tool_response", "thread_id": thread_id, "tool_call_id": pending["id"], "content": answer})
+                items.append({
+                    "type": "user.tool_response",
+                    "thread_id": thread_id,
+                    "tool_call_id": pending["id"],
+                    "content": answer,
+                })
     return items
+
+
+def policy_safe(decision: dict[str, Any]) -> dict[str, Any]:
+    if "reason" not in decision:
+        return decision
+    reason = str(decision["reason"])
+    return {**decision, "reason": reason if len(reason) < 400 else reason[:400] + " ..."}
+
+
+def _decide(
+    tool_name: str,
+    violations: list[Violation],
+    fatal: bool,
+    auto_approve: bool,
+    gate: GateState,
+    audit: AuditLog,
+) -> dict[str, Any]:
+    if fatal:
+        console.print(Panel(
+            "This write is refused outright. A fatal violation cannot be repaired by the agent and cannot be approved by a human.",
+            title="[bold red]POLICY GATE: REFUSED[/bold red]", border_style="red"))
+        gate.policy_denials += 1
+        return {"status": "deny", "reason": policy.format_deny_reason(violations)}
+
+    if violations and gate.repairs_left > 0:
+        if not gate.repair_spent:
+            gate.repair_spent = True
+            gate.repairs_left -= 1
+        gate.policy_denials += 1
+        console.print(Panel(
+            f"Auto-denied before a human was asked. The agent gets the violation codes and one chance to repair. Repairs left: {gate.repairs_left}.",
+            title="[bold yellow]POLICY GATE: AUTO-DENIED[/bold yellow]", border_style="yellow"))
+        return {"status": "deny", "reason": policy.format_deny_reason(violations)}
+
+    if violations:
+        console.print("[yellow]Repair budget exhausted. Payload still fails policy.[/yellow]")
+
+    if auto_approve:
+        if violations:
+            console.print("[red]auto-approve refuses payloads that fail policy; denying[/red]")
+            gate.policy_denials += 1
+            return {"status": "deny", "reason": policy.format_deny_reason(violations)}
+        console.print("[yellow]auto-approve enabled and policy clean; allowing[/yellow]")
+        return {"status": "allow"}
+
+    prompt = (
+        "\n[bold]Approve this call?[/bold] [green]y[/green] post, [red]n[/red] deny, "
+        "[cyan]d F1,F2[/cyan] deny and drop those findings: "
+    )
+    answer = console.input(prompt).strip()
+    lowered = answer.lower()
+    if lowered == "y":
+        if violations:
+            console.print("[red]refused: the policy gate is not overridable from this prompt[/red]")
+            gate.policy_denials += 1
+            return {"status": "deny", "reason": policy.format_deny_reason(violations)}
+        return {"status": "allow"}
+    if lowered.startswith("d"):
+        identifiers = [part.strip() for part in answer[1:].replace(",", " ").split() if part.strip()]
+        if identifiers:
+            console.print(f"[cyan]denying and asking for repost without {', '.join(identifiers)}[/cyan]")
+            return {"status": "deny", "reason": policy.drop_reason(identifiers)}
+    reason = console.input("Reason for denial (optional): ").strip()
+    decision: dict[str, Any] = {"status": "deny"}
+    if reason:
+        decision["reason"] = reason
+    return decision
 
 
 def extract_receipts_block(output: str) -> dict[str, Any] | None:
@@ -283,6 +369,7 @@ class GateState:
     denials: int = 0
     policy_denials: int = 0
     approved_receipts: dict[str, Any] | None = None
+    repair_spent: bool = False
 
 
 def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None, save_path: Path | None = None) -> str:
@@ -304,7 +391,7 @@ def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_appro
             required, index, output = stream_turn(client, session_id, input_items, audit)
             if not required:
                 break
-            input_items = collect_decisions(required, index, audit, auto_approve, target)
+            input_items = collect_decisions(required, index, audit, auto_approve, target, gate)
             if not input_items:
                 break
         else:
@@ -334,6 +421,13 @@ def replay(path: Path, delay: float = 0.02) -> None:
                 status = payload["decision"]["status"].upper()
                 colour = "green" if status == "ALLOW" else "red"
                 console.print(f"\n[bold {colour}]HUMAN DECISION: {status}[/bold {colour}] on {payload['tool']}\n")
+            elif kind == "policy_check":
+                if payload.get("clean"):
+                    console.print("[green]policy gate: PASSED[/green]")
+                else:
+                    console.print("[red]policy gate: FAILED[/red]")
+                    for line in payload.get("violations", []):
+                        console.print(f"  [red]{line}[/red]")
             elif kind == "answer":
                 console.print(f"[cyan]human answered:[/cyan] {payload['answer']}")
 

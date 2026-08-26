@@ -110,36 +110,110 @@ def _approval_action(pending_id: str, source_event_id: str) -> dict:
     return {"type": "tool.approval_required", "thread_id": "t1", "tool_calls": [{"id": pending_id, "source_event_id": source_event_id}]}
 
 
-def test_collect_decisions_denies_policy_violation_before_prompt(tmp_path, monkeypatch) -> None:
-    from agent.main import AuditLog, collect_decisions
+def test_collect_decisions_auto_denies_violation_through_repair_budget(tmp_path, monkeypatch) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
     from agent.policy import Target
     index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
         {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"})}}]}}
     audit = AuditLog(tmp_path / "audit.jsonl")
-    def boom(*a, **k):
-        raise AssertionError("human approval prompt must not appear for a denied payload")
-    monkeypatch.setattr("agent.main.show_approval_request", boom)
+    gate = GateState()
+    shown: list[bool] = []
+    def fake_show(tool_name, arguments, clean):
+        shown.append(clean)
+    monkeypatch.setattr("agent.main.show_approval_request", fake_show)
     items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=False,
-                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"))
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
     assert items[0]["approval"]["status"] == "deny"
     assert "policy" in items[0]["approval"]["reason"].lower()
+    assert shown == [False]          # panel shown with FAILED verdict, no human prompt yet
+    assert gate.policy_denials == 1  # consumed one repair
+    assert gate.repairs_left == 1
+
+
+def test_collect_decisions_refuses_human_override_when_repairs_exhausted(tmp_path, monkeypatch) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
+    from agent.policy import Target
+    index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
+        {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"})}}]}}
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState(repairs_left=0)
+    monkeypatch.setattr("agent.main.console.input", lambda prompt="": "y")
+    items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=False,
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
+    assert items[0]["approval"]["status"] == "deny"  # human 'y' cannot override policy
+    assert "policy" in items[0]["approval"]["reason"].lower()
+    assert gate.denials == 1
+    assert gate.policy_denials == 1  # refused human override is a policy-caused denial
+
+
+def test_repair_budget_decrements_once_per_batch(tmp_path) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
+    from agent.policy import Target
+    bad = {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"}
+    index = {"m1": {"id": "m1", "tool_calls": [
+        {"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(bad)}},
+        {"id": "c2", "function": {"name": "add_issue_comment", "arguments": json.dumps(bad)}},
+    ]}}
+    action = {"type": "tool.approval_required", "thread_id": "t1", "tool_calls": [
+        {"id": "c1", "source_event_id": "m1"}, {"id": "c2", "source_event_id": "m1"}]}
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState()
+    items = collect_decisions([action], index, audit, auto_approve=False,
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
+    assert [i["approval"]["status"] for i in items] == ["deny", "deny"]
+    assert gate.repairs_left == 1      # decremented ONCE for the batch, not per call
+    assert gate.policy_denials == 2    # every policy-caused denial still counted
+
+
+def test_drop_command_preserves_finding_id_case(tmp_path, monkeypatch) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
+    from agent.policy import Target
+    index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
+        {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"})}}]}}
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState(repairs_left=0)
+    monkeypatch.setattr("agent.main.console.input", lambda prompt="": "d F1,F2")
+    items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=False,
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
+    assert items[0]["approval"]["status"] == "deny"
+    reason = items[0]["approval"]["reason"]
+    assert "F1, F2" in reason       # original case preserved
+    assert "f1" not in reason       # not lowercased
+    assert gate.denials == 1
+
+
+def test_auto_approve_refusal_counts_policy_denial(tmp_path) -> None:
+    from agent.main import AuditLog, GateState, collect_decisions
+    from agent.policy import Target
+    index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
+        {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": "no receipts block here"})}}]}}
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState(repairs_left=0)
+    items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=True,
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
+    assert items[0]["approval"]["status"] == "deny"
+    assert gate.policy_denials == 1  # auto-approve rejection is a policy-caused denial
+    assert gate.denials == 1
 
 
 def test_collect_decisions_passes_clean_flag_and_allows(tmp_path, monkeypatch) -> None:
-    from agent.main import AuditLog, collect_decisions
+    from agent.main import AuditLog, GateState, collect_decisions
     from agent.policy import Target
     body = "## Receipts\n\n```receipts\n" + json.dumps(_clean_receipts_payload()) + "\n```"
     index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(
         {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": body})}}]}}
     audit = AuditLog(tmp_path / "audit.jsonl")
+    gate = GateState()
     captured: dict = {}
     def fake_show(tool_name, arguments, clean):
         captured["clean"] = clean
     monkeypatch.setattr("agent.main.show_approval_request", fake_show)
     items = collect_decisions([_approval_action("c1", "m1")], index, audit, auto_approve=True,
-                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"))
+                              target=Target(repo="Sreekarji/trueforge-review-agent", pr="2"), gate=gate)
     assert items[0]["approval"]["status"] == "allow"
     assert captured["clean"] is True
+    assert gate.approvals == 1
+    assert gate.approved_receipts is not None  # receipts extracted from the approved body
 
 
 def _verify_artifact(tmp_path, repo, pr, session_id="sess_1"):
