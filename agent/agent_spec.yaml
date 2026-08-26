@@ -6,7 +6,7 @@ manifest:
     params:
       temperature: 0.1
       max_tokens: 8000
-      parallel_tool_calls: true
+      parallel_tool_calls: false
 
   mcp_servers:
     - name: ${TRUEFORGE_GITHUB_CONNECTOR}
