@@ -228,6 +228,7 @@ def collect_decisions(
     gate: GateState,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    gate.repair_spent = False  # the repair budget is per agent turn, not per call in a batch
     for action in required:
         action_type = action.get("type")
         thread_id = action.get("thread_id") or "main"
@@ -303,7 +304,9 @@ def _decide(
         return {"status": "deny", "reason": policy.format_deny_reason(violations)}
 
     if violations and gate.repairs_left > 0:
-        gate.repairs_left -= 1
+        if not gate.repair_spent:
+            gate.repair_spent = True
+            gate.repairs_left -= 1
         gate.policy_denials += 1
         console.print(Panel(
             f"Auto-denied before a human was asked. The agent gets the violation codes and one chance to repair. Repairs left: {gate.repairs_left}.",
@@ -316,6 +319,7 @@ def _decide(
     if auto_approve:
         if violations:
             console.print("[red]auto-approve refuses payloads that fail policy; denying[/red]")
+            gate.policy_denials += 1
             return {"status": "deny", "reason": policy.format_deny_reason(violations)}
         console.print("[yellow]auto-approve enabled and policy clean; allowing[/yellow]")
         return {"status": "allow"}
@@ -329,10 +333,11 @@ def _decide(
     if lowered == "y":
         if violations:
             console.print("[red]refused: the policy gate is not overridable from this prompt[/red]")
+            gate.policy_denials += 1
             return {"status": "deny", "reason": policy.format_deny_reason(violations)}
         return {"status": "allow"}
     if lowered.startswith("d"):
-        identifiers = [part.strip() for part in lowered[1:].replace(",", " ").split() if part.strip()]
+        identifiers = [part.strip() for part in answer[1:].replace(",", " ").split() if part.strip()]
         if identifiers:
             console.print(f"[cyan]denying and asking for repost without {', '.join(identifiers)}[/cyan]")
             return {"status": "deny", "reason": policy.drop_reason(identifiers)}
@@ -364,6 +369,7 @@ class GateState:
     denials: int = 0
     policy_denials: int = 0
     approved_receipts: dict[str, Any] | None = None
+    repair_spent: bool = False
 
 
 def run_review(client: TrueForgeClient, agent_name: str, prompt: str, auto_approve: bool, repo: str = "", pr: str = "", max_pauses: int = 10, resume_session_id: str | None = None, save_path: Path | None = None) -> str:
