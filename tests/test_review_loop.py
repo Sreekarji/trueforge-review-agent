@@ -196,6 +196,58 @@ def test_auto_approve_refusal_counts_policy_denial(tmp_path) -> None:
     assert gate.denials == 1
 
 
+def test_run_review_resumes_given_session(tmp_path, monkeypatch) -> None:
+    from agent.main import run_review
+    from agent.policy import Target
+    monkeypatch.setattr("agent.main.RUNS_DIR", tmp_path)
+    seen: list[tuple] = []
+    class FakeClient:
+        def create_session(self, name):
+            seen.append(("create", name))
+            return {"id": "brand-new"}
+        def stream_turn(self, session_id, input_items):
+            seen.append(("stream", session_id))
+            yield {"type": "turn.done", "state": {"status": "done", "required_actions": [], "output": {"content": "done"}}}
+    out = run_review(FakeClient(), "agent", "p", False, Target(repo="owner/repo", pr="1"), session_id="orig-sess")
+    assert out == "done"
+    assert ("create", "agent") not in seen      # session resumed, not created
+    assert ("stream", "orig-sess") in seen
+
+
+def test_run_review_persists_approved_receipts(tmp_path, monkeypatch) -> None:
+    from agent.main import run_review
+    from agent.policy import Target
+    monkeypatch.setattr("agent.main.RUNS_DIR", tmp_path)
+    captured: dict = {}
+    def fake_save(receipts, repo, pr, session_id, directory=Path("runs"), path=None):
+        captured.update(receipts=receipts, repo=repo, pr=pr, session_id=session_id)
+        return tmp_path / "artifact.json"
+    monkeypatch.setattr("agent.main.receipts_store.save", fake_save)
+    body = "## Receipts\n\n```receipts\n" + json.dumps(_clean_receipts_payload()) + "\n```"
+    args = {"owner": "Sreekarji", "repo": "trueforge-review-agent", "issue_number": 2, "body": body}
+    action = {"type": "tool.approval_required", "thread_id": "t1", "tool_calls": [{"id": "c1", "source_event_id": "m1"}]}
+    index = {"m1": {"id": "m1", "tool_calls": [{"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(args)}}]}}
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+        def create_session(self, name):
+            return {"id": "sess-1"}
+        def stream_turn(self, session_id, input_items):
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "model.message", "id": "m1", "tool_calls": [
+                    {"id": "c1", "function": {"name": "add_issue_comment", "arguments": json.dumps(args)}}]}
+                yield {"type": "turn.done", "state": {"status": "done", "required_actions": [action], "output": {"content": "paused"}}}
+            else:
+                yield {"type": "turn.done", "state": {"status": "done", "required_actions": [], "output": {"content": "posted"}}}
+    out = run_review(FakeClient(), "agent", "p", True, Target(repo="Sreekarji/trueforge-review-agent", pr="2"), session_id="sess-1")
+    assert out == "posted"
+    assert captured["repo"] == "Sreekarji/trueforge-review-agent"
+    assert captured["pr"] == "2"
+    assert captured["session_id"] == "sess-1"
+    assert captured["receipts"]["findings"][0]["id"] == "F1"
+
+
 def test_collect_decisions_passes_clean_flag_and_allows(tmp_path, monkeypatch) -> None:
     from agent.main import AuditLog, GateState, collect_decisions
     from agent.policy import Target
