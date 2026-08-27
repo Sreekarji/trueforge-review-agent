@@ -3,23 +3,25 @@
 Most AI code review is unfalsifiable. It says "this may cause a race condition"
 and leaves a human to find out. Receipts is a review agent with one rule:
 
-> **A finding is not reported unless a test written and run in a sandbox reproduced it.**
+> **A finding is not reported unless proven by a test run in a sandbox — or explicitly labelled UNVERIFIED.**
 
 It reads a GitHub pull request, forms hypotheses about defects, proves each one
-with three sandboxed runs — **base / head / patched** — pauses for human
-approval through a deterministic policy gate, then posts the evidence-backed
-findings as a GitHub comment. Every hypothesis is proven, refuted, or explicitly
-labelled unverified. Refuted findings are deleted and counted, so you can see
-how much noise was suppressed. Nothing reaches GitHub until a human approves
-the exact payload. No finding is reported unless reproduced by a failing test
-in the sandbox.
+in an isolated sandbox, pauses for human approval through a deterministic
+policy gate, then posts the evidence-backed findings as a GitHub comment.
+Evidence is tiered. REGRESSION and PRE-EXISTING findings require a full
+three-run differential proof (base / head / patched). REFUTED hypotheses are
+dropped after the head run passes. UNVERIFIED findings — reported only when
+execution is unavailable — are flagged explicitly as unverified, with no
+sandbox proof attached. Refuted findings are counted, so you can see how much
+noise was suppressed. Nothing reaches GitHub until a human approves the exact
+payload.
 
 ## How it uses TrueForge
 
 | Capability | How Receipts uses it |
 |---|---|
 | MCP tools | GitHub connector reads the PR, its diff, and file contents. DeepWiki for unfamiliar dependencies. |
-| Sandbox | Every reproduction runs in an isolated sandbox — the only place agent-written code executes. Each hypothesis gets a three-run differential proof (base/head/patched). |
+| Sandbox | Every reproduction runs in an isolated sandbox — the only place agent-written code executes. Only REGRESSION and PRE-EXISTING require the full three-run proof (base/head/patched); REFUTED stops after the head run; UNVERIFIED carries no runs. |
 | Approval gate | `require_approval_for_tools` pauses before any GitHub write. Payload shown in full, policy-checked, before you decide. |
 | Subagents | One proof subagent per hypothesis, run sequentially to stay within rate limits. |
 | Session continuity | Receipts are persisted to a `runs/` artifact with the session id; `--verify` resumes that session to re-check findings against a new head. |
