@@ -8,7 +8,7 @@ from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
 ENV = {
-    "TRUEFORGE_MODEL": "bai/deepseek-v4-flash",
+    "TRUEFORGE_MODEL": "deep32/deepseek-v4-flash",
     "TRUEFORGE_GITHUB_CONNECTOR": "github",
     "TRUEFORGE_DEEPWIKI_CONNECTOR": "deepwiki",
 }
