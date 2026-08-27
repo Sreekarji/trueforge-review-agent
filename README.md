@@ -3,80 +3,103 @@
 Most AI code review is unfalsifiable. It says "this may cause a race condition"
 and leaves a human to find out. Receipts is a review agent with one rule:
 
-> **A finding is not reported unless a test written and run in a sandbox reproduced it.**
+> **A finding is not reported unless proven by a test run in a sandbox — or explicitly labelled UNVERIFIED.**
 
-Every hypothesis is proven, refuted, or explicitly labelled unverified. Refuted
-findings are deleted and counted, so you can see how much noise was suppressed.
-Nothing reaches GitHub until a human approves the exact payload.
+It reads a GitHub pull request, forms hypotheses about defects, proves each one
+in an isolated sandbox, pauses for human approval through a deterministic
+policy gate, then posts the evidence-backed findings as a GitHub comment.
+Evidence is tiered. REGRESSION and PRE-EXISTING findings require a full
+three-run differential proof (base / head / patched). REFUTED hypotheses are
+dropped after the head run passes. UNVERIFIED findings — reported only when
+execution is unavailable — are flagged explicitly as unverified, with no
+sandbox proof attached. Refuted findings are counted, so you can see how much
+noise was suppressed. Nothing reaches GitHub until a human approves the exact
+payload.
 
-## What the harness does
+## How it uses TrueForge
 
 | Capability | How Receipts uses it |
 |---|---|
 | MCP tools | GitHub connector reads the PR, its diff, and file contents. DeepWiki for unfamiliar dependencies. |
-| Sandbox | Every reproduction runs in an isolated sandbox — the only place agent-written code executes. |
-| Approval gate | `require_approval_for_tools` pauses before any GitHub write. Payload shown in full before you decide. |
-| Subagents | More than six hypotheses fan out to parallel proof runs. |
-| Session state | Each approval round is a new turn chained to the same session. |
+| Sandbox | Every reproduction runs in an isolated sandbox — the only place agent-written code executes. Only REGRESSION and PRE-EXISTING require the full three-run proof (base/head/patched); REFUTED stops after the head run; UNVERIFIED carries no runs. |
+| Approval gate | `require_approval_for_tools` pauses before any GitHub write. Payload shown in full, policy-checked, before you decide. |
+| Subagents | One proof subagent per hypothesis, run sequentially to stay within rate limits. |
+| Session continuity | Receipts are persisted to a `runs/` artifact with the session id; `--verify` resumes that session to re-check findings against a new head. |
 
-TrueForge runs the loop. This repo contributes an agent spec, a driver, and a policy — roughly 600 lines, none of it re-implementing a harness.
+TrueForge runs the loop. This repo contributes an agent spec, a driver, a
+policy, and the receipts store — ≈1,250 lines of Python, none of it
+re-implementing a harness.
 
-## Run it in 5 minutes
+## Run it
 
-### No keys? Watch a recorded run (30 seconds)
-
-```bash
-pip install -r requirements.txt
-python -m agent.main --replay runs/demo-run.jsonl
-```
-
-This re-renders a real run from its audit log: sandbox provisioning, reproductions, the approval gate, and the human decision. No server, no model, no credentials needed.
-
-### Full run
-
-**Prerequisites:** Node 22+, Python 3.10+, a GitHub fine-grained PAT, an OpenAI-compatible model key, and a Daytona API key (free tier) for the sandbox.
+**Prerequisites:** Node 22+, Python 3.10+, a GitHub fine-grained PAT, an
+OpenAI-compatible model key, and a Daytona API key (free tier) for the sandbox.
 
 1. **Start the harness.**
 ```bash
-   npx @truefoundry/trueforge   # opens http://localhost:8790
+npx @truefoundry/trueforge   # opens http://localhost:8790
 ```
 
 2. **Configure in the UI** (credentials stay here, never in this repo):
-   - Settings → Models → Add custom provider: your base URL and key. Copy the model FQN.
-   - Settings → Connectors → github: header auth, `Authorization: Bearer <your PAT>`. Fine-grained, Pull requests and Issues read+write.
+   - Settings → Models → Add custom provider: your base URL and key. Copy the
+     model FQN.
+   - Settings → Connectors → github: header auth, `Authorization: Bearer <PAT>`.
+     Fine-grained, Pull requests and Issues read+write.
    - Settings → Sandbox providers → Daytona: your API key.
 
 3. **Configure this repo.**
 ```bash
-   cp .env.example .env   # set TRUEFORGE_MODEL to the FQN from step 2
-   pip install -r requirements.txt
+cp .env.example .env   # set TRUEFORGE_MODEL to the FQN from step 2
+pip install -r requirements.txt
 ```
 
 4. **Register the agent and check the safety policy.**
 ```bash
-   python -m agent.provision
-   python -m agent.main --show-gate
+python -m agent.provision
+python -m agent.main --show-gate
 ```
 
 5. **Review a PR.**
 ```bash
-   python -m agent.main --repo Sreekarji/trueforge-review-agent --pr 2
+python -m agent.main --repo OWNER/REPO --pr NUMBER
 ```
 
-You will see connectors initialise, a sandbox provision, reproductions run, then the run **stop** with the full comment payload on screen. Type `y` to post or `n` to deny.
+You will see connectors initialise, a sandbox provision, reproductions run, then
+the run **stop** with the full comment payload on screen. Type `y` to post or
+`n` to deny.
 
 ## The review target
 
-PR #2 (`demo/buggy-metrics-pr`) is deliberately buggy and deliberately unmerged. Its existing tests all pass, so the agent cannot cheat — it has to write new ones. There are three real defects and at least one plausible-but-wrong hypothesis, making the refutation count meaningful.
+PR #6 ([`demo/buggy-metrics-pr`](https://github.com/Sreekarji/trueforge-review-agent/pull/6))
+is deliberately buggy and deliberately unmerged. Its existing tests all pass, so
+the agent cannot cheat — it has to write new ones. There are three real defects
+and at least one plausible-but-wrong hypothesis, making the refutation count
+meaningful.
 
 ## Safety model
 
-- **The gate is server-side.** `require_approval_for_tools` is enforced by the harness, not by this client. A bug in `main.py` cannot post without approval.
+- **The gate is server-side.** `require_approval_for_tools` is enforced by the
+  harness, not by this client. A bug in `main.py` cannot post without approval.
 - **Least privilege.** Reads are broad; every write tool is named in the gate.
-- **Credentials never enter the sandbox.** Model and MCP credentials stay in the harness.
-- **Everything is logged.** Each run writes `runs/<timestamp>-<session>.jsonl`, redacted.
-- **Auto-approve is deliberately awkward.** Requires both `--auto-approve` and `RECEIPTS_ALLOW_AUTO_APPROVE=1`.
+- **Credentials never enter the sandbox.** Model and MCP credentials stay in the
+  harness.
+- **Everything is logged.** Each run writes `runs/<timestamp>-<session>.jsonl`,
+  redacted.
+- **Auto-approve is deliberately awkward.** Requires both `--auto-approve` and
+  `RECEIPTS_ALLOW_AUTO_APPROVE=1`.
+
+## Qodo Code Review Evidence
+
+Every PR in this repo (#9–#15) went through Qodo's automated review before
+merge, and every action-required finding was fixed or addressed before the
+merge commit. The representative trail is
+[PR #10 — the policy gate](https://github.com/Sreekarji/trueforge-review-agent/pull/10):
+Qodo surfaced six bugs spanning correctness, security, and reliability —
+including contradictory run evidence (exit_code/outcome mismatch) passing
+validation, receipts scope remaining unbound to the review target, the approval
+gate crashing instead of pausing, and an ambiguous receipts block being
+accepted. All six were resolved before the merge.
 
 ## Development
 
-Every change went through a pull request reviewed by Qodo before merge. Tests: `python -m pytest -q`.
+Tests: `python -m pytest -q` (55 passing).
