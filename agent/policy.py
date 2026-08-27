@@ -134,7 +134,7 @@ def _finding_violations(finding: dict[str, Any], where: str) -> list[Violation]:
         line = finding.get("line")
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             found.append(Violation("MISSING_FIELD", "line must be a positive integer", where))
-    has_diff = bool(str(finding.get("fix_diff", "")).strip())
+    has_diff = finding.get("fix_diff") is not None and bool(str(finding.get("fix_diff", "")).strip())
     if has_diff and not rule.allows_fix_diff:
         found.append(Violation("UNPROVEN_FIX", f"a {verdict} finding may not ship a fix diff", where))
     if verdict in PROVEN_VERDICTS:

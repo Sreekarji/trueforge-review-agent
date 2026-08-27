@@ -8,7 +8,7 @@ from agent.provision import SpecError, gated_tools, load_spec
 
 SPEC = Path("agent/agent_spec.yaml")
 ENV = {
-    "TRUEFORGE_MODEL": "bai/deepseek-v4-flash",
+    "TRUEFORGE_MODEL": "deep32/deepseek-v4-flash",
     "TRUEFORGE_GITHUB_CONNECTOR": "github",
     "TRUEFORGE_DEEPWIKI_CONNECTOR": "deepwiki",
 }
@@ -16,7 +16,7 @@ ENV = {
 def test_write_tools_are_gated() -> None:
     _, manifest = load_spec(SPEC, ENV)
     gated = gated_tools(manifest)
-    for tool in ("add_issue_comment", "create_issue", "create_pull_request_review"):
+    for tool in ("add_issue_comment", "create_issue", "create_issue_comment", "create_pull_request_review"):
         assert tool in gated, f"{tool} must never run without approval"
 
 def test_missing_env_var_fails_loudly() -> None:

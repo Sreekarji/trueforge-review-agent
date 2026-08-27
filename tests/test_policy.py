@@ -46,6 +46,13 @@ def test_fix_diff_without_green_patched_run_is_denied():
     r = copy.deepcopy(RECEIPTS); r["findings"][0]["verdict"] = "UNFIXED"; r["findings"][0]["runs"].pop("patched")
     assert "UNPROVEN_FIX" in codes(check_receipts(r, TARGET))
 
+def test_unfixed_finding_with_null_fix_diff_is_not_unproven_fix():
+    # agent_spec.yaml instructs UNFIXED findings to set "fix_diff": null.
+    # str(None) == "None" is truthy, so this must not be read as a present diff.
+    r = copy.deepcopy(RECEIPTS); r["findings"][0]["verdict"] = "UNFIXED"
+    r["findings"][0]["fix_diff"] = None
+    assert "UNPROVEN_FIX" not in codes(check_receipts(r, TARGET))
+
 def test_fabricated_evidence_without_real_output_is_denied():
     r = copy.deepcopy(RECEIPTS); r["findings"][0]["runs"]["head"] = {"cmd": "pytest", "exit_code": 1, "outcome": "fail", "tail": "nope"}
     assert "NO_OUTPUT" in codes(check_receipts(r, TARGET))

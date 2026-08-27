@@ -16,6 +16,7 @@ manifest:
         - "@write"
         - "@destructive"
         - "create_issue"
+        - "create_issue_comment"
         - "add_issue_comment"
         - "create_pull_request_review"
         - "add_pull_request_review_comment"
